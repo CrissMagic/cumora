@@ -134,6 +134,18 @@ test('Codex environment overrides personal storage without mutating the parent o
   assert.deepEqual(await readdir(child.CODEX_HOME!), [])
 })
 
+test('an isolated source-build keeps its Codex state separate while sharing only the chosen login', async () => {
+  const personal = await writeAuth(source, 'trial-account')
+  await writeFile(join(source, 'history.jsonl'), 'personal history')
+  process.env.CUMORA_CONFIG_DIR = join(root, 'local-trial')
+  const isolated = codexRuntimeEnv()
+  assert.equal(isolated.CODEX_HOME, join(root, 'local-trial', 'codex-runtime'))
+  assert.equal(await readFile(join(isolated.CODEX_HOME!, 'auth.json'), 'utf8'), await readFile(personal, 'utf8'))
+  await writeFile(join(isolated.CODEX_HOME!, 'history.jsonl'), 'trial history')
+  assert.equal(await readFile(join(source, 'history.jsonl'), 'utf8'), 'personal history')
+  assert.equal(await readdir(destination).catch((error) => error.code === 'ENOENT' ? [] : Promise.reject(error)).then((files) => files.length), 0)
+})
+
 test('authentication stays shared in both directions without sharing personal config or history', async () => {
   const personal = await writeAuth(source, 'original-account')
   await writeFile(join(source, 'config.toml'), 'personal settings')

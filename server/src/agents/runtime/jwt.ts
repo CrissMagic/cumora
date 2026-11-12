@@ -24,6 +24,8 @@ export interface AgentRuntimeClaims {
   computerId: string | null
   /** Opaque generation rotated by PostgreSQL on every authority-bearing move. */
   assignmentId: string
+  /** Local daemon can route project turns to isolated bound directories. */
+  projectWorkspaces?: boolean
   /** Fixed string; lets the server reject tokens minted for other purposes. */
   scope: 'agent-runner'
   /** issued-at, unix seconds. */
@@ -56,6 +58,7 @@ export function signAgentToken(args: {
   computerId: string | null
   assignmentId: string
   ttlSeconds?: number
+  projectWorkspaces?: boolean
 }): string {
   const now = Math.floor(Date.now() / 1000)
   const claims: AgentRuntimeClaims = {
@@ -63,6 +66,7 @@ export function signAgentToken(args: {
     companyId: args.companyId,
     computerId: args.computerId,
     assignmentId: args.assignmentId,
+    ...(args.projectWorkspaces ? { projectWorkspaces: true } : {}),
     scope: 'agent-runner',
     iat: now,
     exp: now + (args.ttlSeconds ?? DEFAULT_TTL_SECONDS),
@@ -96,5 +100,6 @@ export function verifyAgentToken(token: string): AgentRuntimeClaims {
   if (typeof claims.assignmentId !== 'string' || !claims.assignmentId) {
     throw new Error('missing assignmentId')
   }
+  if (claims.projectWorkspaces !== undefined && typeof claims.projectWorkspaces !== 'boolean') throw new Error('invalid projectWorkspaces capability')
   return claims
 }

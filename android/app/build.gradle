@@ -1,14 +1,32 @@
+import groovy.json.JsonSlurper
+
 apply plugin: 'com.android.application'
 
+def appVersion = new JsonSlurper().parse(rootProject.file('../package.json')).version
+def versionParts = (appVersion =~ /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/)
+if (!versionParts.matches()) {
+    throw new GradleException("Invalid package.json version: ${appVersion}")
+}
+def (major, minor, patch) = (1..3).collect { versionParts.group(it).toInteger() }
+if (minor > 999 || patch > 999) {
+    throw new GradleException('Android version encoding requires minor and patch <= 999')
+}
+def versionOverride = providers.gradleProperty('cumoraVersionCode').orNull
+def appVersionCode = versionOverride != null ? versionOverride.toLong() : major * 1000000L + minor * 1000L + patch
+if (appVersionCode < 1 || appVersionCode > 2100000000L) {
+    throw new GradleException('Android versionCode must be between 1 and 2100000000')
+}
+
 android {
+    buildFeatures { buildConfig true }
     namespace = "io.cumora.app"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
         applicationId "io.cumora.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode appVersionCode.toInteger()
+        versionName appVersion
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -22,7 +40,33 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    sourceSets.debug.res.srcDir(layout.buildDirectory.dir('generated/cumora-debug-res'))
 }
+
+// Only the debug variant may reach a LAN HTTP backend. Keep the host from
+// the same build-time origin that Vite embeds, out of checked-in resources.
+def trialOrigin = providers.environmentVariable('VITE_CUMORA_API_BASE').orElse('').get()
+def trialUri = trialOrigin ? new URI(trialOrigin) : null
+def trialHttpHost = trialUri?.scheme == 'http' ? trialUri.host : ''
+if (trialUri?.scheme == 'http' && !trialHttpHost) {
+    throw new GradleException('VITE_CUMORA_API_BASE must contain an absolute HTTP host')
+}
+def debugNetworkFile = layout.buildDirectory.file('generated/cumora-debug-res/xml/cumora_debug_network_security_config.xml')
+def generateDebugNetwork = tasks.register('generateCumoraDebugNetwork') {
+    inputs.file('src/debug/res/xml/network_security_config.xml')
+    inputs.property('httpHost', trialHttpHost ?: '')
+    outputs.file(debugNetworkFile)
+    doLast {
+        def xml = file('src/debug/res/xml/network_security_config.xml').text
+        if (trialHttpHost) {
+            xml = xml.replace('</domain-config>', "<domain>${groovy.xml.XmlUtil.escapeXml(trialHttpHost)}</domain></domain-config>")
+        }
+        def target = debugNetworkFile.get().asFile
+        target.parentFile.mkdirs()
+        target.setText(xml, 'UTF-8')
+    }
+}
+tasks.named('preBuild').configure { dependsOn(generateDebugNetwork) }
 
 repositories {
     flatDir{
@@ -32,6 +76,9 @@ repositories {
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
+    // FirebaseApp is used by the guarded push adapter; this is already the
+    // firebase-common version brought in at runtime by the push plugin.
+    implementation 'com.google.firebase:firebase-common:22.0.1'
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"

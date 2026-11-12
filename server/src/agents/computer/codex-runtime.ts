@@ -13,6 +13,7 @@ export const CODEX_RUNTIME_CONFIG_ARGS = [
 ]
 
 export function codexRuntimeHome(): string {
+  if (process.env.CUMORA_CONFIG_DIR) return join(resolve(process.env.CUMORA_CONFIG_DIR), 'codex-runtime')
   return join(homedir(), '.cumora', 'codex-runtime')
 }
 

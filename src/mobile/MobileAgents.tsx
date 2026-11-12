@@ -5,7 +5,8 @@ import { useMe } from '@/stores/auth'
 import { useApp } from '@/stores/app'
 import { useParticipants } from '@/stores/participants'
 import { useConversations } from '@/stores/conversations'
-import { IPlus } from '@/components/icons'
+import { IChat, IPlus } from '@/components/icons'
+import { MobilePageHeader } from './MobilePageHeader'
 import { AgentEditor } from '@/components/AgentEditor'
 import { HumanBadge } from '@/components/HumanBadge'
 import { type MessageKey, useTLabel } from '@/lib/i18n'
@@ -97,36 +98,16 @@ export function MobileAgents() {
 
   return (
     <section className="flex flex-col h-full overflow-hidden bg-paper">
-      <div className="sticky top-0 z-10 backdrop-blur-md"
-        style={{ paddingTop: 'max(env(safe-area-inset-top), 12px)', background: 'rgba(250, 252, 254, 0.95)' }}>
-        <div className="px-4 pt-2 pb-3">
-          <h1 className="font-display font-medium text-[26px] tracking-tight text-ink-900 leading-none">
-            {tLabel('magents.titleLead', 'Your team')} <em className="not-italic text-skype-deep" style={{ fontStyle: 'italic', fontWeight: 400 }}>{tLabel('magents.titleCount', `of ${agents.length}`, { n: agents.length })}</em>
-          </h1>
-          <div className="text-[12.5px] text-ink-500 mt-0.5 font-display italic">
-            {tLabel('magents.subtitle', 'agents work on their own, loop you in when needed')}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto pb-20 px-3">
-        <div className="flex gap-1.5 mb-3 mt-1 text-[10.5px] overflow-x-auto scroll-clean">
-          {[
-            ['working', agents.filter((a) => a.status === 'working').length],
-            ['thinking', agents.filter((a) => a.status === 'thinking').length],
-            ['available', agents.filter((a) => a.status === 'avail').length],
-            ['resting', agents.filter((a) => a.status === 'resting').length],
-          ].map(([lbl, n]) => (
-            <div key={lbl as string} className="py-1 px-2.5 bg-cloud rounded-full text-ink-700 whitespace-nowrap"
-              style={{ border: '1px solid var(--ink-100)' }}>
-              <b className="font-semibold text-skype-deep mr-1">{n as number}</b>{lbl as string}
-            </div>
-          ))}
-        </div>
-
-        <div className="space-y-2.5">
+      <MobilePageHeader title={tLabel('nav.agents', 'Agents')}
+        detail={tLabel('magents.titleCount', `${agents.length} agents`, { n: agents.length })}
+        action={<button type="button" onClick={() => { setEditing(null); setEditorOpen(true) }}
+          className="mobile-primary-icon-button" aria-label={tLabel('magents.hireTitle', 'Hire an agent')}>
+          <IPlus className="h-5 w-5" />
+        </button>} />
+      <div className="flex-1 min-h-0 overflow-y-auto pb-6 px-5">
+        <div className="divide-y divide-ink-100">
           {agents.length === 0 && (
-            <div className="text-center text-ink-300 italic font-display py-12 text-[13px]">
+            <div className="my-6 rounded-2xl border border-ink-100 bg-cloud px-6 py-12 text-center text-[14px] text-ink-500">
               {tLabel('magents.empty', 'No agents in this workspace yet. Hire one below.')}
             </div>
           )}
@@ -134,32 +115,32 @@ export function MobileAgents() {
             <button
               key={p.id}
               type="button"
-              className="w-full text-left bg-cloud rounded-[14px] p-3.5 active:scale-[0.99] transition"
-              style={{ border: '1px solid var(--ink-100)' }}
+              className="w-full text-left py-5 active:bg-ink-100/50"
               onClick={() => { void goChat(p.id) }}
               disabled={opening === p.id}
             >
-              <div className="flex items-start gap-3 mb-2.5">
+              <div className="flex items-center gap-3.5">
                 <Avatar p={p} size={48} />
                 <div className="flex-1 min-w-0">
-                  <h3 className="font-display font-medium text-[18px] tracking-tight leading-tight" style={{ letterSpacing: '-0.01em' }}>{p.name}</h3>
+                  <h3 className="font-display font-medium text-[16px] tracking-tight leading-tight" style={{ letterSpacing: '-0.01em' }}>{p.name}</h3>
                   {p.role && (
-                    <div className="font-display italic text-[12px] text-ink-500 leading-tight mb-1">{p.role}</div>
+                    <div className="text-[13px] text-ink-500 leading-5 mt-1">{p.role}</div>
                   )}
-                  <div className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold py-0.5 px-2 rounded-full"
-                    style={{ background: `${statusColors[p.status]}1F`, color: statusColors[p.status] }}>
+                  <div className="mt-1 inline-flex items-center gap-1.5 text-[12px] font-medium"
+                    style={{ color: 'var(--ink-500)' }}>
                     <span className="w-1.5 h-1.5 rounded-full" style={{ background: statusColors[p.status] }} />
                     {statusLabels[p.status] ? tLabel(statusLabelsKey[p.status], statusLabels[p.status]) : ''}
                   </div>
                 </div>
+                <IChat className="h-5 w-5 shrink-0 text-ink-400" />
               </div>
               {p.bio && (
-                <div className="text-[12px] text-ink-700 leading-[1.5] font-display italic mb-2.5">"{p.bio}"</div>
+                <div className="mt-3 text-[13px] text-ink-500 leading-5 line-clamp-2">{p.bio}</div>
               )}
               {(p.tools ?? []).length > 0 && (
-                <div className="flex flex-wrap gap-1">
+                <div className="mt-3 flex flex-wrap gap-1.5">
                   {(p.tools ?? []).slice(0, 4).map((t) => (
-                    <span key={t} className="font-mono text-[10px] py-0.5 px-1.5 rounded bg-ink-100 text-ink-700">{t}</span>
+                    <span key={t} className="text-[12px] py-1 px-2 rounded-md bg-ink-100 text-ink-500">{t}</span>
                   ))}
                 </div>
               )}
@@ -169,15 +150,14 @@ export function MobileAgents() {
           <button
             type="button"
             onClick={() => { setEditing(null); setEditorOpen(true) }}
-            className="w-full rounded-[14px] p-5 flex items-center justify-center gap-3 text-skype-deep mt-2 active:scale-[0.99] transition"
-            style={{ background: 'linear-gradient(135deg, var(--paper), var(--sky-50))', border: '1.5px dashed var(--ink-200)' }}
+            className="w-full rounded-xl border border-ink-100 bg-cloud p-4 flex items-center gap-3 text-ink-700 mt-5 active:bg-ink-100"
           >
-            <div className="w-10 h-10 grid place-items-center rounded-full bg-cloud shadow-soft">
+            <div className="w-10 h-10 grid place-items-center rounded-lg bg-ink-100">
               <IPlus className="w-5 h-5" strokeWidth={2} />
             </div>
             <div className="text-left">
               <div className="font-display font-medium text-[15px] text-ink-900" style={{ letterSpacing: '-0.01em' }}>{tLabel('magents.hireTitle', 'Hire an agent')}</div>
-              <div className="font-display italic text-[11.5px] text-ink-500">{tLabel('magents.hireSub', 'design a new teammate')}</div>
+              <div className="text-[13px] text-ink-500">{tLabel('magents.hireSub', 'design a new teammate')}</div>
             </div>
           </button>
         </div>
@@ -188,7 +168,7 @@ export function MobileAgents() {
 
         {humans.length > 0 && (
           <>
-            <div className="px-2 pt-6 pb-2 text-[10px] font-bold text-ink-300 tracking-[0.12em] uppercase">{tLabel('magents.humansHead', 'Human teammates')}</div>
+            <div className="pt-7 pb-3 text-[14px] font-semibold text-ink-500">{tLabel('magents.humansHead', 'Human teammates')}</div>
             <div className="space-y-2">
               {humans.map((p) => (
                 <div key={p.id} className="bg-cloud rounded-[12px] p-3.5 flex items-center gap-3"
@@ -196,7 +176,7 @@ export function MobileAgents() {
                   <Avatar p={p} size={36} />
                   <div className="flex-1 min-w-0">
                     <div className="font-bold text-[14px] text-ink-900 leading-tight">{p.name}</div>
-                    <div className="text-[11px] text-ink-500 mt-0.5">{statusLabels[p.status] ? tLabel(statusLabelsKey[p.status], statusLabels[p.status]) : ''}</div>
+                    <div className="text-[12px] text-ink-500 mt-1">{statusLabels[p.status] ? tLabel(statusLabelsKey[p.status], statusLabels[p.status]) : ''}</div>
                   </div>
                   <HumanBadge />
                 </div>

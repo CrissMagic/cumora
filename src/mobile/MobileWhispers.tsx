@@ -1,3 +1,4 @@
+import { MobilePageHeader } from './MobilePageHeader'
 /**
  * Mobile Whispers — list + room.
  *
@@ -201,39 +202,8 @@ export function MobileWhispersList({ onSelect }: { onSelect: (id: string) => voi
 
   return (
     <section className="flex flex-col h-full bg-paper">
-      <div
-        className="sticky top-0 z-10 bg-paper/95 backdrop-blur-md"
-        style={{ paddingTop: 'max(env(safe-area-inset-top), 12px)' }}
-      >
-        <div className="px-4 pt-2 pb-2 flex items-center gap-2.5">
-          <div
-            className="w-7 h-7 rounded-full grid place-items-center text-whisper-deep shrink-0"
-            style={{
-              background: 'radial-gradient(circle at 30% 30%, var(--whisper-100), var(--whisper-50))',
-              border: '1px solid var(--whisper-100)',
-            }}
-          >
-            <EyeGlyph size={14} />
-          </div>
-          <h1 className="font-display font-medium text-[26px] tracking-tight text-ink-900 leading-none">
-            {t('mwhisp.title')}
-          </h1>
-          <span
-            className="ml-auto inline-flex items-center gap-1.5 py-1 px-2.5 rounded-full text-[10px] font-bold uppercase tracking-[0.08em]"
-            style={{
-              background: 'var(--whisper-50)',
-              color: 'var(--whisper-deep)',
-              border: '1px solid var(--whisper-100)',
-            }}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-whisper animate-pulse-soft" />
-            {t('mwhisp.observing')}
-          </span>
-        </div>
-        <div className="px-4 pb-2.5 text-[12px] text-ink-500 font-display italic leading-snug">
-          {t('mwhisp.headerSub')}
-        </div>
-      </div>
+      <MobilePageHeader title={t('mwhisp.title')} detail={t('mwhisp.headerSub')}
+        action={<span className="rounded-lg bg-ink-100 px-3 py-2 text-[12px] font-medium text-ink-500">{t('mwhisp.observing')}</span>} />
 
       <div className="flex-1 min-h-0">
         <PullToRefresh onRefresh={() => useWhispers.getState().loadList()}>
@@ -244,7 +214,7 @@ export function MobileWhispersList({ onSelect }: { onSelect: (id: string) => voi
               </div>
             )}
             {loaded && list.length === 0 && (
-              <div className="px-6 py-10 text-center text-[13px] text-ink-500 font-display italic leading-relaxed">
+              <div className="mx-5 mt-6 rounded-2xl border border-ink-100 bg-cloud px-6 py-12 text-center text-[14px] text-ink-500 leading-relaxed">
                 {t('mwhisp.empty')}
               </div>
             )}

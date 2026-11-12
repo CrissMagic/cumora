@@ -39,6 +39,8 @@ import { cachedCodexProvider, codexProviderEnv, codexProviderFingerprint, codexP
 import { assertCodexProviderTransport, codexCommandInvocation } from './codex-rpc.js'
 import { modelIdOrNull } from './model-id.js'
 import { supportsNativeFastMode } from '../../../../shared/native-fast-mode.js'
+import { pathToFileURL } from 'node:url'
+import { DeepSeekTurnTracker } from './deepseek-stream.js'
 
 const IS_WIN = process.platform === 'win32'
 
@@ -418,10 +420,10 @@ export async function loginCodexRuntime(): Promise<void> {
   })
 }
 
-export type EngineId = 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini' | 'qwen' | 'antigravity' | 'zcode' | 'maka' | 'omp'
+export type EngineId = 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini' | 'qwen' | 'antigravity' | 'zcode' | 'maka' | 'omp' | 'deepseek' | 'mimo'
 
 /** The pairable engine ids, in the daemon's default detection order. */
-export const ENGINE_IDS: EngineId[] = ['claude', 'codex', 'grok', 'cursor', 'opencode', 'pi', 'gemini', 'qwen', 'antigravity', 'zcode', 'maka', 'omp']
+export const ENGINE_IDS: EngineId[] = ['claude', 'codex', 'grok', 'cursor', 'opencode', 'pi', 'gemini', 'qwen', 'antigravity', 'zcode', 'maka', 'omp', 'deepseek', 'mimo']
 
 /** Engines for which Cumora can impose a fail-closed filesystem + tool-network
  * boundary non-interactively. The remaining adapters still work for operators
@@ -641,7 +643,7 @@ const RESUME_NOT_FOUND_RE = new RegExp([
 
 const ENGINE_CONTEXT_OVERFLOW_RE = /context window|context length|context_length_exceeded|maximum context|reached its context|prompt is too long|input is too long|too many tokens/i
 const ENGINE_RATE_LIMIT_RE = /rate.?limit|usage limit|quota|too many requests|overloaded|over capacity|credit balance is too low/i
-const ENGINE_AUTH_RE = /not (?:logged in|authenticated|signed in)|(?<![\w./\\-])(?:sign|log)[ -]?in(?![\w/\\-]|\.\w)|\brun \/login(?![\w/\\-]|\.\w)|unauthori[sz]ed|forbidden|invalid (?:api )?key|authentication failed/i
+const ENGINE_AUTH_RE = /not (?:logged in|authenticated|signed in)|(?<![\w./\\-])(?:sign|log)[ -]?in(?![\w/\\-]|\.\w)|\brun \/login(?![\w/\\-]|\.\w)|unauthori[sz]ed|forbidden|invalid (?:api )?key|authentication failed|\bMISSING_CREDENTIAL\b/i
 const ENGINE_STARTUP_RE = /\bbwrap:\s*execvp\b|\bspawn(?: [^\n]+)? (?:ENOENT|EACCES)\b/i
 const ENGINE_TRANSPORT_RE = /ECONN(?:RESET|REFUSED)|EPIPE|socket hang up|network|connection (?:closed|lost|terminated|timed out)|transport|process (?:exited|terminated)|failed to (?:spawn|write)/i
 
@@ -1595,9 +1597,12 @@ function claudeSecureSettings(agentHome: string, env: NodeJS.ProcessEnv, nativeF
     .split(PATH_DELIMITER)
     .filter(Boolean)
   pathDirs.push(dirname(process.execPath))
-  const allowRead = [...new Set([agentHome, ...pathDirs])]
+  const runtimeHome = env.CUMORA_AGENT_HOME || agentHome
+  const allowedHomes = [...new Set([agentHome, runtimeHome])]
+  const allowRead = [...new Set([...allowedHomes, ...pathDirs])]
   // Claude permission rules use // for absolute paths; / is source-relative.
   const fileScope = `/${agentHome.replaceAll('\\', '/').replace(/\/$/, '')}`
+  const runtimeScope = `/${runtimeHome.replaceAll('\\', '/').replace(/\/$/, '')}`
   return {
     ...readClaudeUserSettings(env).turnSettings,
     fastMode: nativeFastMode,
@@ -1606,10 +1611,10 @@ function claudeSecureSettings(agentHome: string, env: NodeJS.ProcessEnv, nativeF
       // Restricted mode confines file tools to the working directory. Keep the
       // permission rules scoped too, so this JSON remains fail-closed if a
       // future Claude release changes a restricted-mode default.
-      allow: [`Read(${fileScope}/**)`, `Edit(${fileScope}/**)`, 'Bash', 'mcp__cumora__cli'],
+      allow: [...new Set([fileScope, runtimeScope])].flatMap((scope) => [`Read(${scope}/**)`, `Edit(${scope}/**)`]).concat(['Bash', 'mcp__cumora__cli']),
       // The MCP bridge runs as a trusted daemon helper outside the command
       // sandbox. The model must never rewrite either helper executable.
-      deny: [`Read(${fileScope}/bin/**)`, `Edit(${fileScope}/bin/**)`, 'PowerShell', 'WebFetch', 'WebSearch'],
+      deny: [`Read(${runtimeScope}/bin/**)`, `Edit(${runtimeScope}/bin/**)`, 'PowerShell', 'WebFetch', 'WebSearch'],
     },
     sandbox: {
       enabled: true,
@@ -1647,6 +1652,7 @@ export function claudeSecureFlags(agentHome: string, env: NodeJS.ProcessEnv, nat
   const settings = claudeSecureSettings(agentHome, env, nativeFastMode)
   return [
     '--restricted',
+    ...(env.CUMORA_AGENT_HOME && env.CUMORA_AGENT_HOME !== agentHome ? ['--add-dir', env.CUMORA_AGENT_HOME] : []),
     '--permission-mode', 'dontAsk',
     '--tools', 'Read,Write,Edit,Glob,Grep,Bash,mcp__cumora__cli',
     // Subprocess credential scrubbing requires an explicit CLI approval list.
@@ -1978,7 +1984,7 @@ function codexToolEnvironmentArgs(args: { home: string; env: NodeJS.ProcessEnv }
     if (value !== undefined) entries.push(`${name}=${tomlString(value)}`)
   }
   add('PATH', args.env.PATH)
-  add('HOME', args.home)
+  add('HOME', args.env.CUMORA_AGENT_HOME || args.home)
   add('USER', args.env.USER)
   add('LOGNAME', args.env.LOGNAME)
   add('SHELL', args.env.SHELL)
@@ -2027,6 +2033,8 @@ function codexSecureConfigOverrides(args: { home: string; env: NodeJS.ProcessEnv
   const filesystemEntries = [
     '":minimal"="read"',
     `":workspace_roots"={"."="${workspaceAccess}"}`,
+    ...(!readOnly && args.env.CUMORA_AGENT_HOME && args.env.CUMORA_AGENT_HOME !== args.home
+      ? [`${tomlString(args.env.CUMORA_AGENT_HOME)}="write"`] : []),
   ]
   const filesystem = `permissions.cumora.filesystem={${filesystemEntries.join(',')}}`
   const secureArgs = [
@@ -2560,7 +2568,7 @@ class CodexAdapter implements EngineAdapter {
     if (!base.includes('--json')) base.push('--json')
     const model = args.model ? ['--model', args.model] : []
     const imageArgs = args.vision === 'supported'
-      ? codexLocalImagePaths(args.home, args.localImages ?? []).flatMap((path) => ['--image', path])
+      ? codexLocalImagePaths(args.env.CUMORA_AGENT_HOME || args.home, args.localImages ?? []).flatMap((path) => ['--image', path])
       : []
     // `resume` owns its own positional session id and --image option. Keep the
     // option before the id so clap cannot mistake it for the prompt argument.
@@ -4715,6 +4723,7 @@ class OpenCodeTurnTracker {
   constructor(
     pin: string | null,
     private readonly onHopUsage?: (report: EngineHopReport) => void,
+    private readonly engineName = 'opencode',
   ) {
     this.model = pin
   }
@@ -4753,7 +4762,7 @@ class OpenCodeTurnTracker {
     if (this.onHopUsage) {
       try {
         this.onHopUsage({
-          model: this.model ?? 'opencode',
+          model: this.model ?? this.engineName,
           usage: hopUsage,
           latencyMs: this.hopStartedAt == null ? undefined : Date.now() - this.hopStartedAt,
           hopIndex: this.hopIndex,
@@ -4788,9 +4797,10 @@ async function spawnOpenCodeStream(
     shell: boolean
     onHopUsage?: (report: EngineHopReport) => void
     pin?: string | null
+    engineName?: string
   },
 ): Promise<EngineRunResult & { text: string }> {
-  const tracker = new OpenCodeTurnTracker(opts.pin ?? null, opts.onHopUsage)
+  const tracker = new OpenCodeTurnTracker(opts.pin ?? null, opts.onHopUsage, opts.engineName)
   let processResult: EngineRunResult
   try {
     processResult = await spawnEngine(
@@ -4854,22 +4864,22 @@ const OPENCODE_TRIAGE_AGENT = 'cumora-triage'
 
 /** Inject a reserved, tool-free agent as the final inline config layer while
  * preserving any provider/plugin config the operator already supplied there. */
-function openCodeTriageEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function openCodeTriageEnv(env: NodeJS.ProcessEnv, configKey = 'OPENCODE_CONFIG_CONTENT'): NodeJS.ProcessEnv {
   let inline: Record<string, unknown> = {}
-  const raw = env.OPENCODE_CONFIG_CONTENT?.trim()
+  const raw = env[configKey]?.trim()
   if (raw) {
     let parsed: unknown
     try { parsed = JSON.parse(raw) }
     catch (err) {
-      throw new Error(`OPENCODE_CONFIG_CONTENT is not valid JSON: ${err instanceof Error ? err.message : String(err)}`)
+      throw new Error(`${configKey} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`)
     }
-    if (!objectRecord(parsed)) throw new Error('OPENCODE_CONFIG_CONTENT must be a JSON object')
+    if (!objectRecord(parsed)) throw new Error(`${configKey} must be a JSON object`)
     inline = parsed
   }
   const agents = objectRecord(inline.agent) ? inline.agent : {}
   return {
     ...env,
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({
+    [configKey]: JSON.stringify({
       ...inline,
       agent: {
         ...agents,
@@ -4885,8 +4895,17 @@ function openCodeTriageEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 class OpenCodeAdapter implements EngineAdapter {
-  readonly id = 'opencode' as const
-  readonly bin = 'opencode'
+  readonly bin: string
+
+  // MiMo preserves OpenCode's run JSONL protocol, but has its own binary,
+  // permissions flag, configuration, skills and accounting identity.
+  constructor(readonly id: 'opencode' | 'mimo' = 'opencode') {
+    this.bin = id
+  }
+
+  private triageEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    return openCodeTriageEnv(env, this.id === 'mimo' ? 'MIMOCODE_CONFIG_CONTENT' : 'OPENCODE_CONFIG_CONTENT')
+  }
 
   private turn(prompt: string, args: {
     cwd: string
@@ -4897,12 +4916,12 @@ class OpenCodeAdapter implements EngineAdapter {
     resumeSessionId?: string | null
     onHopUsage?: (report: EngineHopReport) => void
   }): Promise<EngineRunResult & { text: string }> {
-    const { command, shell } = resolveSpawn(this.bin)
+    const { command, shell } = resolveSpawn(this.bin, args.env)
     const model = args.model ? ['--model', args.model] : []
     const resume = args.resumeSessionId ? ['--session', args.resumeSessionId] : []
     return spawnOpenCodeStream(
       command,
-      ['run', '--format', 'json', '--auto', ...resume, ...model],
+      ['run', '--format', 'json', this.id === 'mimo' ? '--dangerously-skip-permissions' : '--auto', ...resume, ...model],
       {
         cwd: args.cwd,
         env: args.env,
@@ -4912,6 +4931,7 @@ class OpenCodeAdapter implements EngineAdapter {
         shell,
         onHopUsage: args.onHopUsage,
         pin: args.model ?? null,
+        engineName: this.id,
       },
     )
   }
@@ -4923,19 +4943,20 @@ class OpenCodeAdapter implements EngineAdapter {
     onLog?: (line: string) => void
     model?: string | null
   }): Promise<EngineRunResult & { text: string }> {
-    const { command, shell } = resolveSpawn(this.bin)
+    const { command, shell } = resolveSpawn(this.bin, args.env)
     const model = args.model ? ['--model', args.model] : []
     return spawnOpenCodeStream(
       command,
       ['run', '--format', 'json', '--agent', OPENCODE_TRIAGE_AGENT, ...model],
       {
         cwd: args.cwd,
-        env: openCodeTriageEnv(args.env),
+        env: this.triageEnv(args.env),
         prompt,
         signal: args.signal,
         onLog: args.onLog,
         shell,
         pin: args.model ?? null,
+        engineName: this.id,
       },
     )
   }
@@ -4945,10 +4966,10 @@ class OpenCodeAdapter implements EngineAdapter {
     if (flags.length) {
       // User-owned output flags remain an escape hatch, but the reserved agent
       // is appended last so the triage process stays tool-free.
-      const { command, shell } = resolveSpawn(this.bin)
+      const { command, shell } = resolveSpawn(this.bin, args.env)
       return spawnCapture(command, ['run', ...flags, '--agent', OPENCODE_TRIAGE_AGENT], {
         cwd: args.cwd,
-        env: openCodeTriageEnv(args.env),
+        env: this.triageEnv(args.env),
         signal: args.signal,
         onLog: args.onLog,
         shell,
@@ -4987,21 +5008,22 @@ class OpenCodeAdapter implements EngineAdapter {
 
   async seedHome(home: string, persona: EnginePersona): Promise<void> {
     await ensureCommonHome(home)
-    await mkdir(join(home, '.opencode', 'skills'), { recursive: true })
+    const skillsDir = this.id === 'mimo' ? '.mimocode/skills/' : '.opencode/skills/'
+    await mkdir(join(home, skillsDir), { recursive: true })
     await writeFile(
       join(home, 'AGENTS.md'),
-      PERSONA_HEADER(persona, { personaFile: 'AGENTS.md', skillsDir: '.opencode/skills/' }),
+      PERSONA_HEADER(persona, { personaFile: 'AGENTS.md', skillsDir }),
       'utf8',
     )
   }
 
   async run(args: EngineRunArgs): Promise<EngineRunResult> {
-    const flags = extraArgs('CUMORA_OPENCODE_ARGS')
+    const flags = extraArgs(this.id === 'mimo' ? 'CUMORA_MIMO_ARGS' : 'CUMORA_OPENCODE_ARGS')
     if (flags.length) {
       // Whole user-owned run-flag override: output becomes opaque, but preserve
       // the session id and stdin prompt so continuity and Windows safety remain.
       const resume = args.resumeSessionId ? ['--session', args.resumeSessionId] : []
-      const { command, shell } = resolveSpawn(this.bin)
+      const { command, shell } = resolveSpawn(this.bin, args.env)
       return spawnEngine(command, ['run', ...flags, ...resume], args, { shell, stdinText: args.prompt })
     }
     return this.turn(args.prompt, {
@@ -6753,6 +6775,93 @@ class AntigravityAdapter implements EngineAdapter {
 }
 
 
+/** One invocation per wake; dsh persists the session behind --session-id.
+ * Temporary overlays never edit the operator's headless profile or credentials. */
+class DeepSeekAdapter implements EngineAdapter {
+  readonly id = 'deepseek' as const
+  readonly bin = 'dsh'
+
+  async seedHome(home: string, persona: EnginePersona): Promise<void> {
+    await ensureCommonHome(home)
+    await mkdir(join(home, '.agents', 'skills'), { recursive: true })
+    await writeFile(join(home, 'AGENTS.md'), PERSONA_HEADER(persona, {
+      personaFile: 'AGENTS.md', skillsDir: '.agents/skills/',
+    }), 'utf8')
+  }
+
+  private async turn(args: EngineRunArgs, toolFree = false): Promise<EngineRunResult & { text: string }> {
+    const tracker = new DeepSeekTurnTracker(args.model ?? null, args.onHopUsage)
+    const overlayDir = await mkdtemp(join(tmpdir(), 'cumora-dsh-'))
+    try {
+      // Title generation is an extra provider call outside the run's step
+      // events, so keep it off rather than silently omit it from the ledger.
+      const patches: unknown[] = [{ id: 'session-title-llm', disabled: true }]
+      if (args.model) {
+        const slash = args.model.indexOf('/')
+        if (slash <= 0 || slash === args.model.length - 1) {
+          throw new Error('DeepSeek Harness model pins must use the configured provider/model route; leave blank to follow the headless profile')
+        }
+        patches.push({ id: 'agent-default-model', config: {
+          provider: args.model.slice(0, slash), model: args.model.slice(slash + 1),
+        } })
+      }
+      if (toolFree) {
+        // A monotonic tools guard also blocks tools installed by user plugins;
+        // merely hiding the shipped shell tools would leave those callable.
+        const plugin = join(overlayDir, 'triage.mjs')
+        await writeFile(plugin,
+          "export const name = 'cumora-tool-free';\nexport const inject = ['tools'];\n" +
+          "export function apply(ctx) { ctx.tools.guard(() => 'Tools are disabled for Cumora classification'); }\n",
+          'utf8')
+        patches.push({ insert: [{ id: 'cumora-tool-free', name: pathToFileURL(plugin).href }] })
+      }
+      const overlay = join(overlayDir, 'patch.json')
+      await writeFile(overlay, JSON.stringify(patches), 'utf8')
+      const invocation = resolveSpawn(this.bin, args.env)
+      const resume = args.resumeSessionId ? ['--session-id', args.resumeSessionId] : []
+      const result = await spawnEngine(invocation.command, [
+        '--profile', 'headless', '--patch', overlay, '--json',
+        '--permission-mode', toolFree ? 'read-only' : 'danger-full-access',
+        '--approval-policy', 'never', ...resume,
+      ], args, {
+        shell: invocation.shell,
+        stdinText: args.prompt,
+        onStdoutLine: (line) => tracker.observe(line),
+      })
+      const streamError = tracker.failure()
+      return {
+        exitCode: result.exitCode === 0 && streamError ? 1 : result.exitCode,
+        error: result.exitCode !== 0 ? [result.error, streamError].filter(Boolean).join('\n') : streamError,
+        sessionId: tracker.sessionId,
+        model: args.model ?? null,
+        usage: tracker.usage,
+        text: tracker.text,
+      }
+    } catch (error) {
+      return { exitCode: 1, text: tracker.text, sessionId: tracker.sessionId,
+        model: args.model ?? null, usage: tracker.usage,
+        error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      await rm(overlayDir, { recursive: true, force: true })
+    }
+  }
+
+  run(args: EngineRunArgs): Promise<EngineRunResult> { return this.turn(args) }
+
+  classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
+    return this.turn({ ...args, home: args.cwd, onLog: args.onLog ?? (() => {}) }, true)
+  }
+
+  probe(args: EngineProbeArgs): Promise<EngineClassifyResult> {
+    return this.classify({ ...args, prompt: DOCTOR_PROMPT,
+      model: args.tier === 'small' ? args.env.CUMORA_TRIAGE_MODEL?.trim() || null : null })
+  }
+
+  probeWake(_args: EngineWakeProbeArgs): Promise<EngineWakeProbeResult> {
+    return Promise.resolve({ ok: true, detail: '', skipped: true })
+  }
+}
+
 const ADAPTERS: Record<EngineId, EngineAdapter> = {
   claude: new ClaudeAdapter(),
   codex: new CodexAdapter(),
@@ -6766,6 +6875,8 @@ const ADAPTERS: Record<EngineId, EngineAdapter> = {
   zcode: new ZcodeAdapter(),
   maka: new MakaAdapter(),
   omp: new OmpAdapter(),
+  deepseek: new DeepSeekAdapter(),
+  mimo: new OpenCodeAdapter('mimo'),
 }
 
 export function getAdapter(id: EngineId): EngineAdapter {

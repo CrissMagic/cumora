@@ -85,6 +85,14 @@ export interface EngineVersionSpec {
  *  RUNNABLE_ENGINE_IDS) and, for engines Cumora can actually wake, ENGINE_IDS
  *  in agents/computer/engine.ts. */
 export const ENGINE_VERSION_SPECS: Record<string, EngineVersionSpec> = {
+  deepseek: {
+    versionArgs: ['--version'],
+    npm: '@deepseek-ai/dsh',
+  },
+  mimo: {
+    versionArgs: ['--version'],
+    npm: '@mimo-ai/cli',
+  },
   claude: {
     versionArgs: ['--version'],
     npm: '@anthropic-ai/claude-code',

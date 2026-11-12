@@ -26,7 +26,7 @@ import { signAgentToken } from '../runtime/jwt.js'
 import type { EngineModelCatalog, EngineModelOption, FastModelScope, ModelCatalogSource } from './model-catalog.js'
 
 export type ComputerKind = 'cloud' | 'local' | 'vps'
-export type EngineId = 'managed' | 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini' | 'qwen' | 'antigravity' | 'zcode' | 'maka' | 'omp'
+export type EngineId = 'managed' | 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | 'pi' | 'gemini' | 'qwen' | 'antigravity' | 'zcode' | 'maka' | 'omp' | 'deepseek' | 'mimo'
 export type ComputerStatus = 'online' | 'offline' | 'busy'
 
 /** How long a paired computer can go without a heartbeat before the sweep
@@ -72,6 +72,8 @@ const PAIRABLE: Record<Exclude<EngineId, 'managed'>, true> = {
   zcode: true,
   maka: true,
   omp: true,
+  deepseek: true,
+  mimo: true,
 }
 export const PAIRABLE_ENGINES: ReadonlySet<string> = new Set<string>(Object.keys(PAIRABLE))
 
@@ -126,6 +128,8 @@ const ENGINE_BINS: Record<Exclude<EngineId, 'managed'>, string> = {
   zcode: 'zcode',
   maka: 'maka',
   omp: 'omp',
+  deepseek: 'dsh',
+  mimo: 'mimo',
 }
 
 /** Cached PATH snapshot from the daemon. The app reads this; it never probes. */
@@ -735,6 +739,7 @@ export async function resolveDevice(token: string): Promise<{ computerId: string
  *  This is the credential the daemon uses for the agent's wake-stream SSE and
  *  daemon-side runtime calls. It never enters the model process or agent home. */
 export async function mintAgentRuntimeToken(args: {
+  projectWorkspaces?: boolean
   providerProfile?: string | null
   computerId: string
   agentId: string
@@ -763,6 +768,7 @@ export async function mintAgentRuntimeToken(args: {
     computerId: rows[0].computer_id,
     assignmentId: rows[0].runtime_assignment_id,
     ttlSeconds: AGENT_TOKEN_TTL_SECONDS,
+    projectWorkspaces: args.projectWorkspaces,
   })
   return { token, expiresInSeconds: AGENT_TOKEN_TTL_SECONDS }
 }
@@ -780,19 +786,23 @@ export async function mintAgentRuntimeToken(args: {
  *  provider can explicitly make its unnamed local default authoritative so a
  *  vendor-specific deploy pin never crosses into the wrong namespace. */
 export async function listAgentsForComputer(computerId: string, supportsProviderProfiles = false): Promise<
-  Array<{ id: string; name: string; role: string | null; systemPrompt: string | null; engine: EngineId | null; model: string | null; fastModel: string | null; providerProfile: string | null; nativeFastMode: boolean; modelCatalog?: EngineModelCatalog }>
+  Array<{ id: string; name: string; role: string | null; systemPrompt: string | null; engine: EngineId | null; model: string | null; fastModel: string | null; providerProfile: string | null; nativeFastMode: boolean; modelCatalog?: EngineModelCatalog; projectWorkspaces?: boolean }>
 > {
   const { rows } = await pool.query<{
     id: string; name: string; role: string | null; systemPrompt: string | null
     engine: EngineId | null; model: string | null; fastModel: string | null
     providerProfile: string | null
     nativeFastMode: boolean
+    projectWorkspaces?: boolean
     availableEngines?: string[]; detectedEngines?: unknown; engineDefaults?: unknown
   }>(
     `SELECT p.id, p.name, p.role, p.system_prompt AS "systemPrompt", p.engine, p.model,
             p.fast_model AS "fastModel", p.provider_profile AS "providerProfile", p.native_fast_mode AS "nativeFastMode", c.available_engines AS "availableEngines",
             COALESCE(c.detected_engines, '[]'::jsonb) AS "detectedEngines",
-            COALESCE(c.engine_defaults, '{}'::jsonb) AS "engineDefaults"
+            COALESCE(c.engine_defaults, '{}'::jsonb) AS "engineDefaults",
+            EXISTS (SELECT 1 FROM conversation_members cm JOIN conversations cv ON cv.id = cm.conversation_id
+              JOIN project_workspaces w ON w.project_id = cv.project_id
+              WHERE cm.participant_id = p.id AND cm.company_id = p.company_id AND cv.company_id = p.company_id) AS "projectWorkspaces"
        FROM participants p
        JOIN computers c ON c.id = p.computer_id
       WHERE p.computer_id = $1 AND p.kind = 'agent' AND p.departed_at IS NULL
@@ -841,7 +851,9 @@ export async function listAgentsForComputer(computerId: string, supportsProvider
     if (modelWithEngineDefault) {
       return { ...agent, ...(localCatalog ? { modelCatalog: localCatalog } : {}), model: modelWithEngineDefault, fastModel: fastModelWithEngineDefault }
     }
-    const dflt = r.engine === 'codex'
+    const dflt = r.engine === 'deepseek' || r.engine === 'mimo'
+      ? null // Provider defaults belong to these local engines.
+      : r.engine === 'codex'
       ? codexDefault
       : r.engine === 'claude'
         ? claudeDefault

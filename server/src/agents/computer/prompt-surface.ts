@@ -14,7 +14,7 @@ export function actionSurfaceFor(unsandboxed: boolean): ActionSurface {
 }
 
 /** The opening "how you act" sentence. */
-export function actionSurfaceText(surface: ActionSurface): string {
+export function actionSurfaceText(surface: ActionSurface, projectWorkspace = false): string {
   if (surface === 'cli') {
     return 'You act on Cumora through the `cumora` CLI on your PATH.\n\n'
   }
@@ -23,7 +23,9 @@ export function actionSurfaceText(surface: ActionSurface): string {
     '`{"argv":["reply","<conversationId>","your text"]}` is the shape; every `cumora <cmd> …` ' +
     'below is the same words without the leading `cumora`. There is no `cumora` on PATH ' +
     'and no runtime URL or token to look for. Use the sandboxed shell for local scripts, ' +
-    'tests and builds under `workspace/`; keep project files and build caches there. ' +
+    (projectWorkspace
+      ? 'tests and builds in the bound project working directory; keep project files and build caches there. '
+      : 'tests and builds under `workspace/`; keep project files and build caches there. ') +
     'Cumora actions still go through the MCP tool, not the shell.\n\n'
   )
 }
@@ -33,11 +35,13 @@ export function actionSurfaceText(surface: ActionSurface): string {
  *  Through a shell, inline backticks and `$(…)` are mangled, so the answer is a
  *  file plus `--file`. Through the bridge there is no shell to mangle anything
  *  — argv is literal — and `--file` / `--stdin` are refused outright. */
-export function postingMechanicsText(surface: ActionSurface): string {
+export function postingMechanicsText(surface: ActionSurface, notesDirectory?: string): string {
   if (surface === 'cli') {
+    const file = notesDirectory ? `${notesDirectory}/reply.md` : 'notes/reply.md'
+    const fileArgument = notesDirectory ? `"${file}"` : file
     return (
       'Posting a message: For ANY message with backticks, code, $, quotes, or multiple lines, ' +
-      'write it to a file (e.g. `notes/reply.md`) and post with `cumora reply <conversationId> --file notes/reply.md` — ' +
+      `write it to a file (e.g. \`${file}\`) and post with \`cumora reply <conversationId> --file ${fileArgument}\` — ` +
       'the shell mangles inline `backtick` / `$(...)` content. For short plain text, ' +
       "`cumora reply <conversationId> 'text'` (SINGLE quotes) is fine. "
     )

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { MobilePageHeader } from './MobilePageHeader'
 import { Avatar } from '@/components/Avatar'
 import { cn } from '@/lib/utils'
 import { useApp } from '@/stores/app'
@@ -27,7 +28,7 @@ const TOGGLE_PREFS: ToggleablePref[] = [
   { key: 'agents.new_tools_ok',  lbl: 'mobileMe.prefs.newTools',     sub: 'mobileMe.prefs.newToolsSub',     default: true },
 ]
 
-export function MobileMe() {
+export function MobileMe({ active = true }: { active?: boolean }) {
   const t = useT()
   const authUser = useAuth((s) => s.user)
   const meId = useMe()
@@ -81,36 +82,19 @@ export function MobileMe() {
 
   return (
     <section className="flex flex-col h-full overflow-hidden bg-paper">
-      <div
-        className="text-center pt-6 pb-6 px-5 border-b border-ink-100"
-        style={{
-          paddingTop: 'max(env(safe-area-inset-top), 24px)',
-          // Soft sky wash — the previous coral radial read as a bright
-          // red bloom behind the avatar and overpowered the page. A
-          // gentle sky tint reads as "a quiet morning" instead.
-          background: 'linear-gradient(180deg, var(--sky-50) 0%, var(--paper) 100%)',
-        }}>
-        <div className="mx-auto mb-3 inline-block">
-          <Avatar p={me} size={92} />
-        </div>
-        <h2 className="font-display font-medium text-[28px] tracking-tight text-ink-900 leading-[1.1]" style={{ letterSpacing: '-0.028em' }}>
-          {me.name}
-        </h2>
-        <div className="font-display italic text-[13px] text-ink-500 mt-0.5 mb-2.5">
-          {authUser?.email ?? t('mobileMe.defaultRole')}
-        </div>
-        <div className="font-display italic text-[12.5px] text-ink-700 max-w-[280px] mx-auto leading-snug">
-          {stewardLine}
-        </div>
-        {activeCompany && (
-          <div className="mt-3 inline-flex items-center gap-1.5 py-1 px-2.5 rounded-full bg-cloud border border-ink-100 text-[10.5px] text-ink-500 tracking-wider uppercase">
-            <span className="w-1.5 h-1.5 rounded-full bg-avail" />
-            {activeCompany.name}
+      <MobilePageHeader title={t('nav.me')} />
+      <div className="flex-1 min-h-0 overflow-y-auto pb-6">
+        <div className="mx-5 mt-5 rounded-2xl border border-ink-100 bg-cloud p-4">
+          <div className="flex items-center gap-4">
+            <Avatar p={me} size={56} />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-[20px] font-semibold tracking-tight text-ink-900 truncate">{me.name}</h2>
+              <div className="mt-1 text-[13px] text-ink-500 break-all">{authUser?.email ?? t('mobileMe.defaultRole')}</div>
+              {activeCompany && <div className="mt-1 text-[13px] text-ink-700 truncate">{activeCompany.name}</div>}
+            </div>
           </div>
-        )}
-      </div>
-
-      <div className="flex-1 overflow-y-auto pb-20">
+          <div className="mt-4 border-t border-ink-100 pt-3 text-[13px] leading-5 text-ink-500">{stewardLine}</div>
+        </div>
         {companies.length > 1 && (
           <Section title={t('mobileMe.workspace')}>
             <div className="bg-cloud rounded-[12px] p-2" style={{ border: '1px solid var(--ink-100)' }}>
@@ -125,7 +109,7 @@ export function MobileMe() {
               className="text-center bg-cloud rounded-[12px] py-5 px-4"
               style={{ border: '1px dashed var(--ink-100)' }}
             >
-              <div className="font-display italic text-[13px] text-ink-500 leading-snug">
+              <div className="text-[13px] text-ink-500 leading-snug">
                 {t('mobileMe.quietWorkspace')}
               </div>
             </div>
@@ -146,7 +130,7 @@ export function MobileMe() {
                       <Avatar p={a} size={36} />
                       <div className="min-w-0 flex-1">
                         <div className="text-[13px] font-semibold text-ink-900 leading-tight truncate">{a.name}</div>
-                        <div className="font-display italic text-[10.5px] text-ink-500 leading-tight truncate">
+                        <div className="text-[12px] text-ink-500 leading-tight truncate">
                           {a.role ?? 'agent'}
                         </div>
                       </div>
@@ -157,11 +141,11 @@ export function MobileMe() {
                           className="h-full rounded-full"
                           style={{
                             width: `${threshold * 100}%`,
-                            background: 'linear-gradient(90deg, var(--whisper), var(--avail))',
+                            background: 'var(--avail)',
                           }}
                         />
                       </div>
-                      <span className="font-mono text-[9.5px] font-semibold text-ink-500 tabular-nums">
+                      <span className="font-mono text-[12px] font-semibold text-ink-500 tabular-nums">
                         {threshold.toFixed(2)}
                       </span>
                     </div>
@@ -172,9 +156,8 @@ export function MobileMe() {
           )}
         </Section>
 
-        <Section title={t('mobileMe.push')}>
-          <PushStatusTile />
-        </Section>
+
+
 
         <Section title={t('mobileMe.preferences')}>
           <div className="bg-cloud rounded-[12px] divide-y divide-ink-100"
@@ -187,11 +170,13 @@ export function MobileMe() {
                   key={it.key}
                   type="button"
                   onClick={() => void setPref(it.key, !on)}
+                  role="switch"
+                  aria-checked={on}
                   className="w-full text-left flex items-center gap-3 p-3.5 active:bg-paper transition"
                 >
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-[13px] text-ink-900 leading-tight">{t(it.lbl)}</div>
-                    <div className="font-display italic text-[11px] text-ink-500 mt-0.5">{t(it.sub)}</div>
+                    <div className="font-medium text-[14px] text-ink-900 leading-tight">{t(it.lbl)}</div>
+                    <div className="text-[12px] text-ink-500 mt-0.5">{t(it.sub)}</div>
                   </div>
                   <span className={cn('w-9 h-5 rounded-full relative shrink-0 transition-colors', on ? 'bg-skype' : 'bg-ink-200')}>
                     <span className={cn('absolute w-4 h-4 bg-white rounded-full top-0.5 transition-all', on ? 'left-[18px]' : 'left-0.5')}
@@ -207,8 +192,8 @@ export function MobileMe() {
           <div className="bg-cloud rounded-[12px] p-3.5 flex items-center gap-3"
             style={{ border: '1px solid var(--ink-100)' }}>
             <div className="flex-1 min-w-0">
-              <div className="font-semibold text-[13px] text-ink-900 leading-tight">{t('common.language')}</div>
-              <div className="font-display italic text-[11px] text-ink-500 mt-0.5">{t('common.languageSub')}</div>
+              <div className="font-medium text-[14px] text-ink-900 leading-tight">{t('common.language')}</div>
+              <div className="text-[12px] text-ink-500 mt-0.5">{t('common.languageSub')}</div>
             </div>
             <LanguagePicker className="w-[140px] shrink-0" />
           </div>
@@ -218,19 +203,26 @@ export function MobileMe() {
           <div className="bg-cloud rounded-[12px] p-3.5 flex items-center gap-3"
             style={{ border: '1px solid var(--ink-100)' }}>
             <div className="flex-1 min-w-0">
-              <div className="font-semibold text-[13px] text-ink-900 leading-tight">{t('common.appearance')}</div>
-              <div className="font-display italic text-[11px] text-ink-500 mt-0.5">{t('common.appearanceSub')}</div>
+              <div className="font-medium text-[14px] text-ink-900 leading-tight">{t('common.appearance')}</div>
+              <div className="text-[12px] text-ink-500 mt-0.5">{t('common.appearanceSub')}</div>
             </div>
             <AppearancePicker className="w-[140px] shrink-0" />
           </div>
           <div className="bg-cloud rounded-[12px] p-3.5 flex items-center gap-3 mt-2"
             style={{ border: '1px solid var(--ink-100)' }}>
             <div className="flex-1 min-w-0">
-              <div className="font-semibold text-[13px] text-ink-900 leading-tight">{t('common.chatLayout')}</div>
-              <div className="font-display italic text-[11px] text-ink-500 mt-0.5">{t('common.chatLayoutSub')}</div>
+              <div className="font-medium text-[14px] text-ink-900 leading-tight">{t('common.chatLayout')}</div>
+              <div className="text-[12px] text-ink-500 mt-0.5">{t('common.chatLayoutSub')}</div>
             </div>
             <ChatLayoutPicker className="w-[140px] shrink-0" />
           </div>
+        </Section>
+
+        <Section title={t('mobileMe.push')}>
+          <details className="rounded-xl border border-ink-100 bg-cloud">
+            <summary className="cursor-pointer px-4 py-4 text-[14px] font-medium text-ink-700">{t('mobileMe.pushDetails')}</summary>
+            <PushStatusTile active={active} />
+          </details>
         </Section>
 
         <div className="px-4 pt-2 pb-4 space-y-2">
@@ -250,7 +242,7 @@ export function MobileMe() {
             style={{ border: '1px solid rgba(255, 122, 107, 0.3)' }}
           >
             {t('common.signOut')}
-            <span className="block font-display italic text-[11px] text-ink-500 mt-0.5">{t('mobileMe.signOutSub')}</span>
+            <span className="block text-[12px] text-ink-500 mt-0.5">{t('mobileMe.signOutSub')}</span>
           </button>
           <DeleteAccountButton />
         </div>
@@ -261,8 +253,8 @@ export function MobileMe() {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="px-4 pt-5">
-      <h4 className="text-[10.5px] font-extrabold text-skype tracking-[0.14em] uppercase mb-2.5">↳ {title}</h4>
+    <div className="px-5 pt-6">
+      <h4 className="text-[14px] font-semibold text-ink-500 mb-3">{title}</h4>
       {children}
     </div>
   )
@@ -271,7 +263,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 /** Inline diagnostic tile that mirrors the in-process push state to
  *  the UI so users can SEE why notifications aren't arriving and
  *  re-trigger registration without quitting the app. */
-function PushStatusTile() {
+function PushStatusTile({ active }: { active: boolean }) {
   const t = useT()
   const [status, setStatus] = useState<PushStatus>(() => getPushStatus())
   const [busy, setBusy] = useState(false)
@@ -279,13 +271,15 @@ function PushStatusTile() {
     // Cheap poll — the push module mutates module-local state and
     // doesn't emit events; a 1s interval is enough for the tile to
     // reflect a re-register click within a frame the user notices.
+    if (!active) return
+    setStatus(getPushStatus())
     const t = setInterval(() => setStatus(getPushStatus()), 1000)
     return () => clearInterval(t)
-  }, [])
+  }, [active])
 
   if (!status.supported) {
     return (
-      <div className="bg-cloud rounded-[12px] p-3.5 text-[12px] text-ink-500 font-display italic"
+      <div className="bg-cloud rounded-[12px] p-3.5 text-[12px] text-ink-500 "
         style={{ border: '1px solid var(--ink-100)' }}>
         {t('push.notSupported')}
       </div>
@@ -328,14 +322,14 @@ function PushStatusTile() {
       <div className="p-3.5 flex items-center gap-3">
         <span className="w-2 h-2 rounded-full shrink-0" style={{ background: status.prefEnabled ? 'var(--avail)' : 'var(--coral)' }} />
         <div className="flex-1 min-w-0">
-          <div className="font-semibold text-[13px] text-ink-900 leading-tight">{t('push.appPref')}</div>
-          <div className="font-display italic text-[11px] text-ink-500 mt-0.5">
+          <div className="font-medium text-[14px] text-ink-900 leading-tight">{t('push.appPref')}</div>
+          <div className="text-[12px] text-ink-500 mt-0.5">
             {status.prefEnabled
               ? t('push.appPrefOnSub')
               : t('push.appPrefOffSub')}
           </div>
         </div>
-        <span className="text-[10.5px] font-bold tracking-wider uppercase px-2 py-1 rounded-full"
+        <span className="text-[12px] font-bold tracking-wider uppercase px-2 py-1 rounded-full"
           style={{ background: 'var(--ink-100)', color: 'var(--ink-700)' }}>
           {status.prefEnabled ? t('push.on') : t('push.off')}
         </span>
@@ -343,8 +337,8 @@ function PushStatusTile() {
       <div className="p-3.5 flex items-center gap-3">
         <span className="w-2 h-2 rounded-full shrink-0" style={{ background: permColor }} />
         <div className="flex-1 min-w-0">
-          <div className="font-semibold text-[13px] text-ink-900 leading-tight">{t('push.iosPerm')}</div>
-          <div className="font-display italic text-[11px] text-ink-500 mt-0.5">
+          <div className="font-medium text-[14px] text-ink-900 leading-tight">{t('push.iosPerm')}</div>
+          <div className="text-[12px] text-ink-500 mt-0.5">
             {perm === 'denied'
               ? t('push.iosPermDenied')
               : perm === 'granted'
@@ -354,7 +348,7 @@ function PushStatusTile() {
                   : t('push.iosPermWillAsk')}
           </div>
         </div>
-        <span className="text-[10.5px] font-bold tracking-wider uppercase px-2 py-1 rounded-full"
+        <span className="text-[12px] font-bold tracking-wider uppercase px-2 py-1 rounded-full"
           style={{ background: 'var(--ink-100)', color: 'var(--ink-700)' }}>
           {permLabel}
         </span>
@@ -362,8 +356,8 @@ function PushStatusTile() {
       <div className="p-3.5 flex items-center gap-3">
         <span className="w-2 h-2 rounded-full shrink-0" style={{ background: status.tokenSuffix ? 'var(--avail)' : 'var(--ink-300)' }} />
         <div className="flex-1 min-w-0">
-          <div className="font-semibold text-[13px] text-ink-900 leading-tight">{t('push.deviceToken')}</div>
-          <div className="font-display italic text-[11px] text-ink-500 mt-0.5">
+          <div className="font-medium text-[14px] text-ink-900 leading-tight">{t('push.deviceToken')}</div>
+          <div className="text-[12px] text-ink-500 mt-0.5">
             {status.tokenSuffix
               ? t('push.deviceTokenOk', { suffix: status.tokenSuffix })
               : t('push.deviceTokenNone')}
@@ -373,13 +367,13 @@ function PushStatusTile() {
       {/* The smoking gun for "why is push silently dead?". Shows the
           deepest step the most recent init() reached. */}
       <div className="p-3.5">
-        <div className="text-[10.5px] font-bold uppercase tracking-wider text-ink-500 mb-1">{t('push.lastStep')}</div>
-        <div className="font-display italic text-[12px] text-ink-700 leading-snug">
+        <div className="text-[12px] font-bold uppercase tracking-wider text-ink-500 mb-1">{t('push.lastStep')}</div>
+        <div className="text-[12px] text-ink-700 leading-snug">
           {stepLabel[status.lastStep]}
         </div>
       </div>
       {status.lastError && (
-        <div className="p-3.5 text-[11.5px] font-display italic text-coral-deep leading-snug">
+        <div className="p-3.5 text-[11.5px] text-coral-deep leading-snug">
           {t('push.lastError', { err: status.lastError })}
         </div>
       )}
@@ -390,7 +384,7 @@ function PushStatusTile() {
         className="w-full text-left p-3.5 active:bg-paper transition text-[12.5px] font-semibold text-skype-deep disabled:opacity-50"
       >
         {busy ? t('push.working') : t('push.reregister')}
-        <span className="block font-display italic text-[11px] text-ink-500 mt-0.5 font-normal not-italic">
+        <span className="block text-[12px] text-ink-500 mt-0.5 font-normal not-italic">
           {t('push.reregisterSub')}
         </span>
       </button>
@@ -401,7 +395,7 @@ function PushStatusTile() {
         className="w-full text-left p-3.5 active:bg-paper transition text-[12.5px] font-semibold text-coral-deep disabled:opacity-50"
       >
         {t('push.resetRetry')}
-        <span className="block font-display italic text-[11px] text-ink-500 mt-0.5 font-normal not-italic">
+        <span className="block text-[12px] text-ink-500 mt-0.5 font-normal not-italic">
           {t('push.resetRetrySub')}
         </span>
       </button>
@@ -427,7 +421,7 @@ function DeleteAccountButton() {
         style={{ border: '1px solid rgba(255, 122, 107, 0.3)' }}
       >
         {t('push.deleteTitle')}
-        <span className="block font-display italic text-[11px] text-ink-500 mt-0.5">{t('push.deleteSub')}</span>
+        <span className="block text-[12px] text-ink-500 mt-0.5">{t('push.deleteSub')}</span>
       </button>
     )
   }
@@ -440,11 +434,11 @@ function DeleteAccountButton() {
       <div className="font-display text-[13px] text-ink-900 font-semibold mb-1">
         {t('push.deleteConfirmTitle')}
       </div>
-      <div className="font-display italic text-[12px] text-ink-700 leading-snug mb-3">
+      <div className="text-[12px] text-ink-700 leading-snug mb-3">
         {t('push.deleteConfirmBody')}
       </div>
       {err && (
-        <div className="text-[11.5px] text-coral-deep font-display italic mb-2 leading-snug">
+        <div className="text-[11.5px] text-coral-deep mb-2 leading-snug">
           {err}
         </div>
       )}

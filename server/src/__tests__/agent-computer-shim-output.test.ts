@@ -165,6 +165,22 @@ test('writeShim atomically replaces final symlinks without writing their targets
   assert.equal(await readFile(join(binDir, 'cumora'), 'utf8'), CUMORA_SHIM)
 })
 
+test('a source-build agent can read its inbox through helpers nested in an ESM project', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cumora-shim-esm-'))
+  cleanup.push(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'package.json'), '{"type":"module"}')
+  const binDir = join(root, 'tools')
+  const ipcDir = join(root, 'ipc')
+  await writeShim(binDir)
+  const broker = new RuntimeCliBroker(ipcDir, join(root, 'broker'), async () => ({ text: 'project task from the inbox', exitCode: 0 }))
+  await broker.start()
+  cleanup.push(() => broker.stop())
+  const result = await execFileP(process.execPath, [join(binDir, 'cumora'), 'inbox'], {
+    env: { ...process.env, CUMORA_AGENT_IPC_DIR: ipcDir }, windowsHide: true, timeout: 5000,
+  })
+  assert.equal(result.stdout, 'project task from the inbox\n')
+})
+
 test('writeShim rejects a linked shim directory', {
   skip: process.platform === 'win32',
 }, async () => {

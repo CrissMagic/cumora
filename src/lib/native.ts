@@ -171,11 +171,15 @@ export async function bootNative(): Promise<void> {
   // fragment, fire a window event that AuthGate consumes, and dismiss the
   // browser sheet so the user lands back on the (now-signed-in) shell.
   try {
-    App.addListener('appUrlOpen', (event: URLOpenListenerEvent) => {
+    await App.addListener('appUrlOpen', (event: URLOpenListenerEvent) => {
       if (!event.url) return
-      console.log('[native] appUrlOpen', event.url)
+      console.log('[native] deep link received')
       void handleDeepLink(event.url)
     })
+    // A link that launches a stopped app is not guaranteed to be replayed as
+    // appUrlOpen. Keep the fragment available for AuthGate's initial mount too.
+    const launch = await App.getLaunchUrl()
+    if (launch?.url) await handleDeepLink(launch.url)
   } catch (err) {
     console.warn('[native] appUrlOpen listener failed', err)
   }
@@ -208,7 +212,7 @@ async function handleDeepLink(rawUrl: string): Promise<void> {
       const hash = hashIdx >= 0
         ? rawUrl.slice(hashIdx)
         : (qIdx >= 0 ? `#${rawUrl.slice(qIdx + 1)}` : '')
-      console.log('[native] OAuth deep link, hash=', hash)
+      console.log('[native] OAuth callback received')
       if (hash) {
         history.replaceState(null, '', location.pathname + location.search + hash)
         window.dispatchEvent(new CustomEvent('cumora:oauth-token', { detail: hash }))
@@ -218,7 +222,7 @@ async function handleDeepLink(rawUrl: string): Promise<void> {
     }
     window.dispatchEvent(new CustomEvent('cumora:deep-link', { detail: rawUrl }))
   } catch (err) {
-    console.warn('[native] deep-link parse failed', rawUrl, err)
+      console.warn('[native] deep-link parse failed', err)
   }
 }
 

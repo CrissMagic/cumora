@@ -56,6 +56,7 @@ import { AGENT_NATIVE_FAST_MODE_SQL, agentNativeFastModeChecksum } from './migra
 import { MESSAGE_ATTACHMENTS_SQL, messageAttachmentsChecksum } from './migrations/0012-message-attachments.js'
 import { ATTACHMENT_GRANTS_SQL, attachmentGrantsChecksum } from './migrations/0013-attachment-grants.js'
 import { COMPUTER_UNSANDBOXED_MODE_SQL, computerUnsandboxedModeChecksum } from './migrations/0014-computer-unsandboxed-mode.js'
+import { PROJECT_WORKSPACES_SQL, projectWorkspacesChecksum } from './migrations/0015-project-workspaces.js'
 
 /** Frozen data backfill embedded in migration 0001. Exported so its behavior
  * can be exercised against PostgreSQL without replaying the whole migration. */
@@ -2662,6 +2663,12 @@ const VERSIONED_MIGRATIONS: readonly VersionedMigration[] = [
     sourceChecksum: computerUnsandboxedModeChecksum(),
     transactional: true,
     up: async (client) => { await client.query(COMPUTER_UNSANDBOXED_MODE_SQL) },
+  },
+  {
+    ...SCHEMA_MIGRATIONS[14],
+    sourceChecksum: projectWorkspacesChecksum(),
+    transactional: true,
+    up: async (client) => { await client.query(PROJECT_WORKSPACES_SQL) },
   },
 ]
 

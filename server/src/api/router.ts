@@ -19,6 +19,8 @@ import {
   resolveMessageAttachments, validateChatUpload,
 } from '../storage.js'
 import { healthPool, pool } from '../db/pool.js'
+import { bindProjectWorkspace, computerProjectWorkspaces, listProjectWorkspaces, reportProjectWorkspace, unbindProjectWorkspace } from '../project-workspaces.js'
+import { ProjectWorkspaceInputError } from '../../../shared/project-workspaces.js'
 import { CH_MESSAGE_NEW, CH_REACTIONS, CH_CONVO_UPDATED, CH_DOCS, CH_TYPING, CH_CALENDAR_EVENTS, CH_BOARDS, CH_STATUS, CH_WORKSPACES, publish } from '../redis.js'
 import { enqueueBroadcast, nudgeRealtimeOutbox, withOutboxTransaction } from '../realtime-outbox.js'
 import { enqueueWorkspaceCleanup, nudgeWorkspaceCleanupWorker } from '../workspace-cleanup.js'
@@ -1447,9 +1449,25 @@ api.get('/computers/me/control-stream', safe(async (req, res) => {
 }))
 
 // Agents assigned to the calling computer (daemon discovery on boot).
+api.get('/computers/me/project-workspaces', safe(async (req, res) => {
+  const { computerId } = await requireDevice(req)
+  res.json(await computerProjectWorkspaces(computerId))
+}))
+
+api.post('/computers/me/project-workspaces/:id/status', safe(async (req, res) => {
+  const { computerId } = await requireDevice(req)
+  try { await reportProjectWorkspace(computerId, String(req.params.id), req.body) }
+  catch (error) {
+    if (error instanceof ProjectWorkspaceInputError) throw new HttpError(400, error.message)
+    throw error
+  }
+  res.json({ ok: true })
+}))
+
 api.get('/computers/me/agents', safe(async (req, res) => {
   const { computerId } = await requireDevice(req)
-  res.json(await listAgentsForComputer(computerId, req.query.providerProfiles === '1'))
+  const agents = await listAgentsForComputer(computerId, req.query.providerProfiles === '1')
+  res.json(agents.filter((agent) => !agent.projectWorkspaces || req.query.projectWorkspaces === '1'))
 }))
 
 // The daemon reads this before engine discovery so a persisted UI setting is
@@ -1481,7 +1499,7 @@ api.post('/computers/heartbeat', safe(async (req, res) => {
 // Mint a per-agent runtime JWT for the calling computer (daemon refresh loop).
 api.post('/agents/:id/runtime-token', safe(async (req, res) => {
   const { computerId } = await requireDevice(req)
-  const minted = await mintAgentRuntimeToken({ computerId, agentId: String(req.params.id), providerProfile: readProviderProfile(req.body?.providerProfile) })
+  const minted = await mintAgentRuntimeToken({ computerId, agentId: String(req.params.id), providerProfile: readProviderProfile(req.body?.providerProfile), projectWorkspaces: req.body?.projectWorkspaces === true })
   if (!minted) throw new HttpError(403, 'agent not assigned to this computer')
   res.json(minted)
 }))
@@ -2435,34 +2453,96 @@ api.post('/invitations/:token/accept', safe(async (req, res) => {
 
 /* ============== Projects ============== */
 
+api.get('/projects/:id/workspaces', safe(async (req, res) => {
+  const { companyId, userId } = await requireCompany(req)
+  const { rows } = await pool.query('SELECT 1 FROM projects WHERE id = $1 AND company_id = $2', [req.params.id, companyId])
+  if (!rows.length) throw new HttpError(404, 'project not found')
+  res.json(await listProjectWorkspaces(String(req.params.id), companyId, userId))
+}))
+
+api.put('/projects/:id/workspaces/:computerId', safe(async (req, res) => {
+  const { companyId, userId } = await requireCompanyRole(req)
+  let workspace
+  try {
+    workspace = await bindProjectWorkspace({ projectId: String(req.params.id), computerId: String(req.params.computerId),
+      companyId, userId, path: req.body?.path })
+  } catch (error) {
+    // Only input validation is a client error; database failures must remain failures.
+    if (error instanceof ProjectWorkspaceInputError) throw new HttpError(400, error.message)
+    throw error
+  }
+  if (!workspace) throw new HttpError(403, 'active project and an owned paired computer required')
+  res.json(workspace)
+}))
+
+api.delete('/projects/:id/workspaces/:computerId', safe(async (req, res) => {
+  const { companyId, userId } = await requireCompanyRole(req)
+  const removed = await unbindProjectWorkspace({ projectId: String(req.params.id), computerId: String(req.params.computerId), companyId, userId })
+  if (!removed) throw new HttpError(404, 'workspace binding not found')
+  res.json({ ok: true })
+}))
+
 api.get('/projects', async (req, res) => {
-  const { companyId: tenant } = await requireCompany(req)
+  const { companyId: tenant, userId } = await requireCompany(req)
   const { rows } = await pool.query(
     `SELECT id, name, description, color, status,
             created_at AS "createdAt", archived_at AS "archivedAt",
-            (SELECT COUNT(*)::int FROM conversations WHERE project_id = projects.id) AS "conversationCount"
+            (SELECT COUNT(*)::int FROM conversations WHERE project_id = projects.id) AS "conversationCount",
+            COALESCE((SELECT jsonb_agg(jsonb_build_object(
+              'id', w.id, 'projectId', w.project_id, 'computerId', w.computer_id,
+              'path', w.path, 'status', w.status, 'error', w.error, 'isGit', w.is_git,
+              'checkedAt', w.checked_at, 'computerName', c.name, 'computerStatus', c.status)
+              ORDER BY c.name, c.id)
+              FROM project_workspaces w JOIN computers c ON c.id = w.computer_id
+              WHERE w.project_id = projects.id AND c.company_id = $1
+                AND c.owner_user_id = $2 AND c.revoked_at IS NULL), '[]'::jsonb) AS workspaces
        FROM projects
       WHERE company_id = $1
       ORDER BY status ASC, created_at DESC`,
-    [tenant],
+    [tenant, userId],
   )
   res.json(rows)
 })
 
-api.post('/projects', async (req, res) => {
-  const { companyId: tenant } = await requireCompany(req)
+api.post('/projects', safe(async (req, res) => {
+  const { companyId: tenant, userId } = await requireCompany(req)
   const name = String(req.body?.name ?? '').trim().slice(0, 80)
   const description = String(req.body?.description ?? '').slice(0, 1000)
   const color = req.body?.color ? String(req.body.color).slice(0, 200) : null
-  if (!name) { res.status(400).json({ error: 'name required' }); return }
+  if (!name) throw new HttpError(400, 'name required')
+  const workspaceInput = req.body?.workspace
+  if (workspaceInput !== undefined) {
+    await requireCompanyRole(req)
+    if (!workspaceInput || typeof workspaceInput !== 'object' || Array.isArray(workspaceInput)
+      || typeof workspaceInput.computerId !== 'string' || !workspaceInput.computerId.trim()) {
+      throw new HttpError(400, 'workspace requires computerId and an absolute path')
+    }
+  }
   const id = `p-${randomUUID().slice(0, 10)}`
-  await pool.query(
-    `INSERT INTO projects (id, company_id, name, description, color)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [id, tenant, name, description, color],
-  )
-  res.status(201).json({ id, name, description, color, status: 'active' })
-})
+  // An invalid binding must not leave an empty project behind. Existing callers
+  // may still create an unbound project with the same request and response.
+  const client = await pool.connect()
+  let workspace
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      `INSERT INTO projects (id, company_id, name, description, color)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [id, tenant, name, description, color],
+    )
+    if (workspaceInput !== undefined) {
+      workspace = await bindProjectWorkspace({ projectId: id, companyId: tenant, userId,
+        computerId: workspaceInput.computerId, path: workspaceInput.path }, client)
+      if (!workspace) throw new HttpError(403, 'an owned paired computer is required')
+    }
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    if (error instanceof ProjectWorkspaceInputError) throw new HttpError(400, error.message)
+    throw error
+  } finally { client.release() }
+  res.status(201).json({ id, name, description, color, status: 'active', ...(workspace ? { workspace } : {}) })
+}))
 
 api.put('/projects/:id', async (req, res) => {
   // Renaming or recoloring a shared project ripples through every member's

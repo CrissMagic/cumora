@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion, useTransform, type MotionValue } from 'framer-motion'
 import { useApp } from '@/stores/app'
 import { useT } from '@/lib/i18n'
@@ -10,6 +10,7 @@ import { MobileConvene } from './MobileConvene'
 import { MobileLibrary } from './MobileLibrary'
 import { MobileAgents } from './MobileAgents'
 import { MobileMe } from './MobileMe'
+import { useMobileProjects } from './useMobileProjects'
 import { DocumentEditor } from '@/components/DocumentEditor'
 import { BoardPeekContent, CalendarEventPeekContent } from '@/components/ArtifactPeekContent'
 import { useDocuments } from '@/stores/documents'
@@ -18,6 +19,7 @@ import { initPushNotifications } from '@/lib/push'
 import { MobileParticipantInfo } from './MobileParticipantInfo'
 import { useSwipeBackProps } from './useSwipeBack'
 import { ViewBoundary } from './ViewBoundary'
+import type { ViewKey } from '@/types'
 
 const ShippingWorkspace = lazy(() => import('@/components/ShippingWorkspace').then((module) => ({ default: module.ShippingWorkspace })))
 
@@ -32,11 +34,17 @@ const ShippingWorkspace = lazy(() => import('@/components/ShippingWorkspace').th
  *  the right transition type because the swipe-back commit reuses
  *  the same curve with the user's release velocity carried over. */
 const slideTransition = { type: 'spring' as const, stiffness: 320, damping: 38, mass: 1 }
-/** Cross-tab fades. iOS's UITabBarController doesn't animate the
- *  swap at all (just a hard cut on selection), but a hard cut on a
- *  hybrid app where each tab has loading time / network state reads
- *  as "jank". 140ms is just long enough to mask the layout pop. */
-const fadeTransition = { duration: 0.14, ease: [0.4, 0, 0.2, 1] as const }
+/** Mount each root screen on its first visit and keep its filters, drafts and
+ * scroll position. Root tabs swap immediately; push/pop animation belongs only
+ * to the detail stack. `hidden` removes inactive screens from focus and layout. */
+function MobileTabPanel({ name, children }: { name: ViewKey['view']; children: ReactNode }) {
+  const active = useApp((s) => s.view === name)
+  const [visited, setVisited] = useState(active)
+  useEffect(() => { if (active) setVisited(true) }, [active])
+  if (!active && !visited) return null
+  return <div data-mobile-tab={name} hidden={!active} aria-hidden={!active}
+    className="absolute inset-0 isolate bg-paper">{children}</div>
+}
 
 function MobileDocumentPeek({ documentId, onClose }: { documentId: string; onClose: () => void }) {
   const t = useT()
@@ -95,6 +103,7 @@ function MobileDocumentPeek({ documentId, onClose }: { documentId: string; onClo
 
 export function MobileApp() {
   const t = useT()
+  const projects = useMobileProjects()
   const view = useApp((s) => s.view)
   const convoId = useApp((s) => s.selectedConversationId)
   const stack = useApp((s) => s.mobileStack)
@@ -158,30 +167,12 @@ export function MobileApp() {
     !infoParticipantId
 
   return (
-    <div className="relative z-10 h-[100dvh] w-screen flex flex-col bg-paper">
+    <div className="mobile-app relative z-10 h-[100dvh] w-screen flex flex-col bg-paper">
       <main className="flex-1 relative overflow-hidden">
-        {/* Top-level view switcher — was previously
-            `<AnimatePresence mode="wait">`, which serializes exits
-            before the next enter. Problem: if ANY nested exit got
-            stuck (e.g. a MotionValue still being driven by a stale
-            drag handler, or framer-motion losing track of a child
-            during a fast tab tap), the outer wait blocked forever
-            and the new tab never mounted → persistent white screen
-            that only `kill app + relaunch` could clear.
-            Default mode (sync) lets the old view's fade-out and the
-            new view's fade-in overlap for the ~140ms transition.
-            They're both `absolute inset-0`, so the overlap reads
-            as a smooth crossfade, not jank. Worst case: even if an
-            exit really IS stuck, the new view still mounts on top
-            and the user can keep working. */}
-        <AnimatePresence>
           {/* CONVERSATIONS view — list is always rendered when this
               view is active so it can peek behind the chat / info
               overlays via parallax during swipe-back. */}
-          {view === 'conversations' && (
-            <motion.div key="conv-root" className="absolute inset-0"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={fadeTransition}>
+          <MobileTabPanel name="conversations">
               <ViewBoundary name="Chats">
               {/* List (parallax background). `isolate` pins the
                   list's internal `z-10` sticky header inside this
@@ -199,7 +190,7 @@ export function MobileApp() {
                   willChange: 'transform',
                 }}
               >
-                <MobileChatList />
+                <MobileChatList projects={projects} />
               </motion.div>
               {/* Chat / Info overlays. Explicit `zIndex: 1` +
                   inline opaque background guarantees they sit
@@ -234,16 +225,12 @@ export function MobileApp() {
                 )}
               </AnimatePresence>
               </ViewBoundary>
-            </motion.div>
-          )}
+          </MobileTabPanel>
 
           {/* WHISPERS view — same pattern: whisper list is always
               the background; whisper room slides in on top with the
               list parallaxing as it goes. */}
-          {view === 'whispers' && (
-            <motion.div key="wh-root" className="absolute inset-0"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={fadeTransition}>
+          <MobileTabPanel name="whispers">
               <ViewBoundary name="Whispers">
               <motion.div
                 className="absolute inset-0 isolate"
@@ -267,54 +254,32 @@ export function MobileApp() {
                 )}
               </AnimatePresence>
               </ViewBoundary>
-            </motion.div>
-          )}
+          </MobileTabPanel>
 
           {/* CONVENE view — reachable from chat header, shows empty state on its own */}
-          {view === 'convene' && (
-            <motion.div key="convene" className="absolute inset-0"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={fadeTransition}>
+          <MobileTabPanel name="convene">
               <ViewBoundary name="Convene"><MobileConvene /></ViewBoundary>
-            </motion.div>
-          )}
+          </MobileTabPanel>
 
           {/* LIBRARY view — documents, boards, calendar */}
-          {view === 'library' && (
-            <motion.div key="library" className="absolute inset-0"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={fadeTransition}>
-              <ViewBoundary name="Library"><MobileLibrary /></ViewBoundary>
-            </motion.div>
-          )}
+          <MobileTabPanel name="library">
+              <ViewBoundary name="Library"><MobileLibrary projects={projects} /></ViewBoundary>
+          </MobileTabPanel>
 
           {/* SHIP view — end-to-end contract, verification, release, and learning loop */}
-          {view === 'shipping' && (
-            <motion.div key="shipping" className="absolute inset-0"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={fadeTransition}>
+          <MobileTabPanel name="shipping">
               <ViewBoundary name="Ship"><Suspense fallback={<div className="h-full grid place-items-center text-sm text-ink-400">{t('mapp.openingShip')}</div>}><ShippingWorkspace compact /></Suspense></ViewBoundary>
-            </motion.div>
-          )}
+          </MobileTabPanel>
 
           {/* AGENTS view */}
-          {view === 'agents' && (
-            <motion.div key="agents" className="absolute inset-0"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={fadeTransition}>
+          <MobileTabPanel name="agents">
               <ViewBoundary name="Agents"><MobileAgents /></ViewBoundary>
-            </motion.div>
-          )}
+          </MobileTabPanel>
 
           {/* ME view */}
-          {view === 'me' && (
-            <motion.div key="me" className="absolute inset-0"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={fadeTransition}>
-              <ViewBoundary name="Me"><MobileMe /></ViewBoundary>
-            </motion.div>
-          )}
-        </AnimatePresence>
+          <MobileTabPanel name="me">
+              <ViewBoundary name="Me"><MobileMe active={view === 'me'} /></ViewBoundary>
+          </MobileTabPanel>
       </main>
 
       {showTabBar && <MobileTabBar />}

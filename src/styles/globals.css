@@ -1029,3 +1029,46 @@ input:focus, textarea:focus, button:focus { outline: none; }
     display: none;
   }
 }
+.mobile-app .mobile-page-header {
+  padding-top: max(env(safe-area-inset-top), 12px);
+  background: var(--paper);
+  border-bottom: 1px solid var(--ink-100);
+}
+.mobile-app .mobile-tab-bar {
+  background: var(--cloud);
+  border-top: 1px solid var(--ink-100);
+}
+.mobile-tab-button {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.mobile-tab-button[aria-current="page"] .mobile-tab-icon {
+  background: var(--ink-100);
+}
+.mobile-tab-button:focus-visible,
+.mobile-app button:focus-visible,
+.mobile-app summary:focus-visible {
+  outline: 2px solid var(--skype-deep);
+  outline-offset: -2px;
+}
+.mobile-app .mobile-icon-button,
+.mobile-app .mobile-primary-icon-button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  color: var(--ink-700);
+  -webkit-tap-highlight-color: transparent;
+}
+.mobile-app .mobile-primary-icon-button {
+  background: var(--ink-900);
+  color: var(--cloud);
+}
+.mobile-app .mobile-icon-button:active {
+  background: var(--ink-100);
+}
+.mobile-app [data-mobile-tab][hidden] {
+  display: none;
+}

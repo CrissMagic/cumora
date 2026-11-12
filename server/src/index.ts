@@ -180,12 +180,11 @@ async function main() {
   if (hasDist) {
     app.use(express.static(DIST_DIR, {
       index: false,
-      // Hashed JS/CSS get long cache; index.html is served via the SPA
-      // fallback below with no-cache headers, so deploys are picked up
-      // instantly even when the static-asset CDN caches aggressively.
+      // Hashed JS/CSS get long cache. HTML must be refreshed, including
+      // stable local access pages whose login credentials can change.
       maxAge: '1h',
       setHeaders: (res, filePath) => {
-        if (filePath.endsWith('index.html')) {
+        if (filePath.endsWith('.html')) {
           res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
         }
       },

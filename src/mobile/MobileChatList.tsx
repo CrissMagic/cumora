@@ -1,19 +1,22 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useApp } from '@/stores/app'
 import { useMe } from '@/stores/auth'
 import { useConversations, isMuted } from '@/stores/conversations'
 import { useMessages } from '@/stores/messages'
 import { useParticipants } from '@/stores/participants'
-import { Avatar, CloudLogo } from '@/components/Avatar'
+import { Avatar } from '@/components/Avatar'
 import { PreviewText } from '@/components/PreviewText'
 import { HiveAvatar } from '@/components/HiveAvatar'
 import { HumanBadge } from '@/components/HumanBadge'
-import { ISearch } from '@/components/icons'
+import { IPlus, ISearch } from '@/components/icons'
 import { GroupCreator } from '@/components/GroupCreator'
-import { api } from '@/api/client'
+import { api, type ApiProject } from '@/api/client'
 import { cn } from '@/lib/utils'
 import { Pressable } from './Pressable'
+import { MobilePageHeader } from './MobilePageHeader'
+import { MobileProjectPicker } from './MobileProjectPicker'
+import type { MobileProjectNavigation } from './useMobileProjects'
 import { useLongPress } from './useLongPress'
 import { MobileContextMenu, type ContextMenuItem } from './MobileContextMenu'
 import { SwipeableRow, type SwipeAction } from './SwipeableRow'
@@ -145,6 +148,7 @@ function MobileRow({ c, onTap, onLongPress }: {
     .filter((n): n is string => Boolean(n))
   return (
     <motion.button
+      data-conversation-id={c.id}
       {...press}
       onClick={(e) => {
         // Touch path uses onTap from useLongPress. This `onClick` is
@@ -158,7 +162,7 @@ function MobileRow({ c, onTap, onLongPress }: {
       whileTap={{ scale: 0.985 }}
       transition={{ type: 'spring', stiffness: 600, damping: 30, mass: 0.5 }}
       className={cn(
-        'w-full text-left grid grid-cols-[48px_1fr_auto] gap-3 py-3 px-4 active:bg-sky2-50 relative',
+        'w-full text-left grid grid-cols-[48px_1fr_auto] gap-3.5 py-4 px-5 border-b border-ink-100/60 active:bg-sky2-50 relative',
         isFresh && 'bg-gradient-to-r from-[rgba(244,183,64,0.08)] to-transparent',
       )}
     >
@@ -194,13 +198,13 @@ function MobileRow({ c, onTap, onLongPress }: {
             </span>
           </div>
         ) : (
-          <div className="text-[12.5px] text-ink-500 leading-snug truncate">
+          <div className="text-[13px] text-ink-500 leading-5 truncate">
             <PreviewText body={c.preview} />
           </div>
         )}
       </div>
       <div className="flex flex-col items-end gap-1 self-center">
-        <span className="text-[10.5px] text-ink-300 tabular-nums">{c.lastAt}</span>
+        <span className="text-[12px] text-ink-500 tabular-nums">{c.lastAt}</span>
         {c.unread !== undefined && c.unread > 0 && (
           <span className="inline-grid place-items-center min-w-[20px] h-5 px-1.5 rounded-full text-[10.5px] font-bold"
             style={{
@@ -409,7 +413,7 @@ function convoMenuItems(
   return items
 }
 
-export function MobileChatList() {
+export function MobileChatList({ projects }: { projects: MobileProjectNavigation }) {
   const t = useT()
   const select = useApp((s) => s.selectConversation)
   const list = useConversations((s) => s.list)
@@ -419,10 +423,37 @@ export function MobileChatList() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQ, setSearchQ] = useState('')
   const [actionFor, setActionFor] = useState<{ c: Conversation; coords: { x: number; y: number } } | null>(null)
-  // GroupCreator is opened from a long-press → "Create group with {name}…"
-  // on a direct chat (mirrors the desktop right-click pattern). When
-  // non-null, the modal is open; `initialPicked` pre-seeds the other person.
-  const [creating, setCreating] = useState<{ initialPicked: string[] } | null>(null)
+  const [creating, setCreating] = useState<{ initialPicked: string[]; project: { id: string; name: string; computerIds: string[] } } | null>(null)
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+  const [pendingGroup, setPendingGroup] = useState<{ initialPicked: string[] } | null>(null)
+  const rootActive = useApp((s) => s.view === 'conversations' && s.mobileStack === 'list')
+  const currentProject = projects.list.find((p) => p.id === projects.selectedId)
+  useEffect(() => { setFilter('All'); setSearchQ(''); setSearchOpen(false) }, [projects.selectedId])
+  const closePicker = useCallback(() => { setProjectPickerOpen(false); setPendingGroup(null) }, [])
+  const startGroup = (project: ApiProject, initialPicked: string[]) => {
+    const computerIds = (project.workspaces ?? []).filter((w) => w.status === 'ready' && w.computerStatus === 'online').map((w) => w.computerId)
+    if (!computerIds.length) return false
+    setCreating({ initialPicked, project: { id: project.id, name: project.name, computerIds } })
+    return true
+  }
+  const beginGroup = (initialPicked: string[] = []) => {
+    if (currentProject && startGroup(currentProject, initialPicked)) return
+    setPendingGroup({ initialPicked }); setProjectPickerOpen(true)
+  }
+  const chooseProject = (id: string | null) => {
+    projects.select(id); setFilter('All')
+    if (pendingGroup && id) {
+      const project = projects.list.find((p) => p.id === id)
+      if (project) startGroup(project, pendingGroup.initialPicked)
+    }
+    closePicker()
+  }
+  useEffect(() => {
+    if (!rootActive || !creating) return
+    const back = (event: Event) => { if (!event.defaultPrevented) { event.preventDefault(); setCreating(null) } }
+    window.addEventListener('cumora:hardware-back', back)
+    return () => window.removeEventListener('cumora:hardware-back', back)
+  }, [rootActive, creating])
   // Virtuoso needs an actual scrolling element to measure against; we let
   // PullToRefresh hand us its inner motion.div via onScrollerReady so the
   // virtualizer reads scrollTop from the same node that drives the
@@ -472,6 +503,7 @@ export function MobileChatList() {
 
   const q = searchQ.trim().toLowerCase()
   const filtered = list.filter((c) => {
+    if (projects.selectedId !== null && c.projectId !== projects.selectedId) return false
     if (c.kind === 'whisper') {
       if (filter !== 'Whispers' && filter !== 'All') return false
     } else if (filter === 'Agents') {
@@ -506,27 +538,23 @@ export function MobileChatList() {
 
   return (
     <section className="flex flex-col h-full bg-paper">
-      <div
-        className="sticky top-0 z-10 bg-paper/95 backdrop-blur-md"
-        style={{ paddingTop: 'max(env(safe-area-inset-top), 12px)' }}
-      >
-        <div className="px-4 pt-2 pb-3 flex items-center gap-2.5">
-          <CloudLogo size={26} />
-          <h1 className="font-display font-medium text-[26px] tracking-tight text-ink-900 leading-none">
-            Cumora
-          </h1>
-          <Pressable
-            onClick={() => { setSearchOpen((v) => !v); if (searchOpen) setSearchQ('') }}
-            className={cn(
-              'ml-auto w-9 h-9 rounded-full grid place-items-center text-ink-700 border',
-              searchOpen ? 'bg-sky2-50 border-sky2-200 text-skype-deep' : 'bg-cloud border-ink-100',
-            )}
-            aria-label={searchOpen ? t('mclist.closeSearch') : t('mclist.openSearch')}
-          >
-            <ISearch className="w-[18px] h-[18px]" />
-          </Pressable>
+      <MobilePageHeader title={currentProject?.name ?? t(projects.selectedId ? 'mprojects.missing' : 'mprojects.allChats')}
+        onTitleClick={() => { setPendingGroup(null); setProjectPickerOpen(true) }}
+        titleExpanded={projectPickerOpen} titleLabel={t('mprojects.switch')}
+        detail={currentProject ? (currentProject.workspaces ?? []).map((w) => `${w.computerName} · ${t(w.computerStatus !== 'online' ? 'project.workspaceOffline' : w.status === 'error' ? 'project.workspaceError' : w.status === 'pending' ? 'project.workspacePending' : 'mprojects.online')}`).join(' / ') || t('mprojects.unbound') : undefined}
+        action={
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => { setSearchOpen((v) => !v); if (searchOpen) setSearchQ('') }}
+            className={cn('mobile-icon-button', searchOpen && 'bg-ink-100')}
+            data-chat-search aria-label={searchOpen ? t('mclist.closeSearch') : t('mclist.openSearch')} aria-expanded={searchOpen}>
+            <ISearch className="h-5 w-5" />
+          </button>
+          <button type="button" onClick={() => beginGroup()}
+            className="mobile-icon-button" aria-label={t('mprojects.newChat')}>
+            <IPlus className="h-5 w-5" />
+          </button>
         </div>
-
+      }>
         {searchOpen && (
           <div className="px-4 pb-2">
             <div className="flex items-center gap-2 bg-cloud rounded-[14px] py-2 px-3"
@@ -554,29 +582,24 @@ export function MobileChatList() {
           </div>
         )}
 
-        <div className="px-4 pb-2 flex gap-2 overflow-x-auto scroll-clean">
+        <div className="px-5 pb-3 flex gap-1 overflow-x-auto scroll-clean">
           {filters.map((f) => {
             const isActive = filter === f
             return (
               <Pressable
                 key={f}
                 onClick={() => setFilter(f)}
-                scale={0.92}
+                noScale
+                aria-pressed={isActive}
                 className={cn(
-                  'py-1.5 px-3.5 text-[12px] font-semibold rounded-full whitespace-nowrap border',
-                  !isActive && 'bg-cloud border-ink-100 text-ink-500',
+                  'min-h-11 px-3 text-[13px] font-medium rounded-lg whitespace-nowrap',
+                  isActive ? 'bg-ink-100 text-ink-900' : 'text-ink-500',
                 )}
-                style={isActive ? {
-                  background: 'var(--sky-100)',
-                  color: 'var(--skype-deep)',
-                  borderColor: 'var(--sky-200)',
-                  boxShadow: '0 1px 2px -1px rgba(0, 120, 200, 0.12)',
-                } : undefined}
               >{t(filterKey(f))}</Pressable>
             )
           })}
         </div>
-      </div>
+      </MobilePageHeader>
 
       <div className="flex-1 min-h-0">
         <PullToRefresh
@@ -597,7 +620,7 @@ export function MobileChatList() {
                 and the gesture-bound `y` transform keep working. */}
             <div className="px-0 pt-1.5 pb-1">
               {byRecency.length === 0 ? (
-                <div className="px-3 py-6 text-center text-[13px] text-ink-300 font-display italic">{t('mclist.empty')}</div>
+                <div className="mx-5 mt-6 rounded-2xl border border-ink-100 bg-cloud px-6 py-12 text-center text-[14px] text-ink-500">{t(projects.selectedId ? 'mprojects.noChats' : 'mclist.empty')}</div>
               ) : scroller ? (
                 <Virtuoso
                   customScrollParent={scroller}
@@ -637,14 +660,18 @@ export function MobileChatList() {
           byId,
           onCreateGroupWith: (id) => {
             setActionFor(null)
-            setCreating({ initialPicked: [id] })
+            beginGroup([id])
           },
         }) : []}
         onClose={() => setActionFor(null)}
       />
-      {creating && (
+      {projectPickerOpen && <MobileProjectPicker projects={projects} active={rootActive}
+        choosingForChat={pendingGroup !== null} onSelect={chooseProject} onClose={closePicker} />}
+      {creating && rootActive && (
         <GroupCreator
+          sheet
           initialPicked={creating.initialPicked}
+          project={creating.project}
           onClose={() => setCreating(null)}
         />
       )}

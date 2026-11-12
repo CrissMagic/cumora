@@ -1,4 +1,5 @@
 import { getActiveCompanyId, getAuthToken, useAuth } from '@/stores/auth'
+import type { ProjectWorkspace } from '../../shared/project-workspaces'
 import type { EngineUpdate } from '../../shared/engine-update'
 import type { AttachmentDescriptor } from '../../shared/attachments'
 import type {
@@ -199,6 +200,11 @@ export interface ApiQuotaResponse {
   error?: string
 }
 
+export interface ApiProjectWorkspace extends ProjectWorkspace {
+  computerName: string
+  computerStatus: string
+}
+
 export interface ApiProject {
   id: string
   name: string
@@ -208,6 +214,7 @@ export interface ApiProject {
   createdAt: string
   archivedAt: string | null
   conversationCount: number
+  workspaces?: ApiProjectWorkspace[]
 }
 
 export interface ApiParticipant {
@@ -426,7 +433,7 @@ export interface ApiAgentRun {
 }
 
 // ── Triage cost-effectiveness ledger ──
-export type ApiTriageSource = 'cloud' | 'byoa-claude' | 'byoa-codex' | 'byoa-grok' | 'byoa-cursor' | 'byoa-opencode' | 'byoa-pi' | 'byoa-gemini' | 'byoa-qwen' | 'byoa-antigravity' | 'byoa-zcode' | 'byoa-maka' | 'byoa-omp'
+export type ApiTriageSource = 'cloud' | 'byoa-claude' | 'byoa-codex' | 'byoa-grok' | 'byoa-cursor' | 'byoa-opencode' | 'byoa-pi' | 'byoa-gemini' | 'byoa-qwen' | 'byoa-antigravity' | 'byoa-zcode' | 'byoa-maka' | 'byoa-omp' | 'byoa-deepseek' | 'byoa-mimo'
 
 export interface ApiTriageAgentRow {
   agentId: string
@@ -868,6 +875,13 @@ export const api = {
   listCompanies: () =>
     http<Array<{ id: string; name: string; slug: string; createdAt: string; role: string }>>('/companies'),
   listProjects: () => http<ApiProject[]>('/projects'),
+  projectWorkspaces: (id: string) => http<{ workspaces: ProjectWorkspace[]; computers: Array<{ id: string; name: string; status: string }> }>(`/projects/${encodeURIComponent(id)}/workspaces`),
+  bindProjectWorkspace: (projectId: string, computerId: string, path: string) =>
+    http<ProjectWorkspace>(`/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(computerId)}`, {
+      method: 'PUT', body: JSON.stringify({ path }),
+    }),
+  unbindProjectWorkspace: (projectId: string, computerId: string) =>
+    http<{ ok: boolean }>(`/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(computerId)}`, { method: 'DELETE' }),
   getShippingOverview: () => http<ShippingOverview>('/shipping/overview'),
   getShippingFeature: (id: string) => http<ShippingFeatureDetail>(`/shipping/features/${encodeURIComponent(id)}`),
   createShippingFeature: (input: {
@@ -904,7 +918,7 @@ export const api = {
     http<ShippingFeatureDetail>(`/shipping/features/${encodeURIComponent(featureId)}/regressions`, { method: 'POST', body: JSON.stringify(input) }),
   updateShippingRegression: (featureId: string, regressionId: string, input: Record<string, unknown>) =>
     http<ShippingFeatureDetail>(`/shipping/features/${encodeURIComponent(featureId)}/regressions/${encodeURIComponent(regressionId)}`, { method: 'PATCH', body: JSON.stringify(input) }),
-  createProject: (input: { name: string; description?: string; color?: string }) =>
+  createProject: (input: { name: string; description?: string; color?: string; workspace?: { computerId: string; path: string } }) =>
     http<{ id: string; name: string; description: string; color: string | null; status: string }>('/projects', {
       method: 'POST', body: JSON.stringify(input),
     }),

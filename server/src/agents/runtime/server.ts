@@ -23,6 +23,9 @@ import { publicBodyParserError } from '../../body-parser-errors.js'
 import { AGENDA_CLASSIFIER_ERROR, claimStallNudge, classifyAgendaActionable, gatherAgentAgenda, renderAgendaBrief } from '../agenda.js'
 import { runCli } from '../cli.js'
 import { buildTriageRequest, gatherClaimsByConvo } from '../inbox-triage.js'
+import { agentProjectWorkspaces } from '../../project-workspaces.js'
+import { ProjectWorkspaceInputError } from '../../../../shared/project-workspaces.js'
+import { pool } from '../../db/pool.js'
 import {
   createAgentRun,
   finishAgentRunForOwner,
@@ -103,7 +106,7 @@ async function authMiddleware(req: RuntimeRequest, res: Response, next: NextFunc
     // request so moves, offboarding, and Computer revocation invalidate an old
     // runtime immediately across the whole surface.
     if (!(await isRuntimeAgentAuthorized(claims))) {
-      res.status(403).json({ error: 'agent runtime assignment changed or was revoked' })
+      res.status(403).json({ error: 'agent runtime assignment changed, was revoked, or requires a daemon with project-directory support' })
       return
     }
   } catch (err) {
@@ -126,6 +129,7 @@ function withAgent(
     try {
       await handler(claims as AuthorizedAgentRuntimeClaims, req, res)
     } catch (err) {
+      if (err instanceof ProjectWorkspaceInputError) { res.status(400).json({ error: err.message }); return }
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[runtime] ${req.method} ${req.path} failed`, msg)
       res.status(500).json({ error: 'runtime request failed' })
@@ -203,7 +207,10 @@ runtimeRouter.post('/conversation/company-id', withAgent(async (_c, req, res) =>
 }))
 
 runtimeRouter.get('/inbox', withAgent(async (c, req, res) => {
-  const rows = await inprocClient.loadInbox(c.sub)
+  const allRows = await inprocClient.loadInbox(c.sub)
+  const rows = scopedProjectInbox(allRows, req)
+  const projectWorkspaces = req.query.workspaceContext === '1'
+    ? await agentProjectWorkspaces(c.sub, c.companyId, c.computerId) : undefined
   // Advance the freshness-preflight "seen" boundary per-convo to the max
   // seq we just surfaced — the caller will SHOW these rows to the agent
   // (default path: daemon's snapshotUnread → brief → big brain). For
@@ -216,7 +223,9 @@ runtimeRouter.get('/inbox', withAgent(async (c, req, res) => {
   // "1" via maybeSteer's loadInbox, baseline advanced past Iris's seq,
   // Bram's preflight then saw nothing newer and posted a duplicate "1").
   const probe = String(req.query.probe ?? '').trim() === '1'
-  if (!probe && rows.length > 0) {
+  // A mapping preview is not yet an engine input. The subsequent scoped read
+  // marks only the selected project, even if the binding was just created.
+  if (!probe && !projectWorkspaces?.length && rows.length > 0) {
     const perConvoMaxSeq = new Map<string, number>()
     for (const r of rows) {
       const cur = perConvoMaxSeq.get(r.conversation_id) ?? 0
@@ -225,7 +234,7 @@ runtimeRouter.get('/inbox', withAgent(async (c, req, res) => {
     const { recordSeen } = await import('../seen-boundary.js')
     await Promise.all([...perConvoMaxSeq.entries()].map(([cid, seq]) => recordSeen(c.sub, cid, seq)))
   }
-  res.json({ rows })
+  res.json({ rows, ...(projectWorkspaces ? { projectWorkspaces } : {}) })
 }))
 
 // BYOA engines use this authenticated endpoint instead of a raw storage URL.
@@ -265,7 +274,29 @@ runtimeRouter.get('/attachment', withAgent(async (c, req, res) => {
 // small brain, so judgment never leaves the operator's machine and never spends
 // cloud quota. This is the whole point of BYOA: local compute. NB: no regex
 // decides anything — every actionability/mode call is the small model's.
-runtimeRouter.get('/inbox-triage/payload', withAgent(async (c, _req, res) => {
+runtimeRouter.get('/project-workspaces', withAgent(async (c, _req, res) => {
+  res.json(await agentProjectWorkspaces(c.sub, c.companyId, c.computerId))
+}))
+
+runtimeRouter.get('/project-scope', withAgent(async (c, req, res) => {
+  const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId : ''
+  const { rows } = await pool.query<{ projectId: string | null }>(
+    `SELECT cv.project_id AS "projectId" FROM conversations cv
+       JOIN conversation_members cm ON cm.conversation_id = cv.id AND cm.company_id = cv.company_id
+      WHERE cv.id = $1 AND cv.company_id = $2 AND cm.participant_id = $3`, [conversationId, c.companyId, c.sub],
+  )
+  if (!rows[0]) { res.status(403).json({ error: 'conversation is not accessible' }); return }
+  res.json(rows[0])
+}))
+
+function scopedProjectInbox<T extends { project_id?: string | null }>(rows: T[], req: Request): T[] {
+  if (!Object.hasOwn(req.query, 'scopeProject')) return rows
+  if (typeof req.query.scopeProject !== 'string') throw new ProjectWorkspaceInputError('Invalid project scope')
+  const projectId = req.query.scopeProject || null
+  return rows.filter((row) => (row.project_id ?? null) === projectId)
+}
+
+runtimeRouter.get('/inbox-triage/payload', withAgent(async (c, req, res) => {
   if (!c.companyId) { res.status(403).json({ error: 'companyId claim required' }); return }
   const persona = await inprocClient.loadPersona(c.sub)
   if (!persona) { res.status(404).json({ error: 'agent not found' }); return }
@@ -277,7 +308,7 @@ runtimeRouter.get('/inbox-triage/payload', withAgent(async (c, _req, res) => {
     res.status(403).json({ error: 'agent does not belong to token tenant' })
     return
   }
-  const inbox = await inprocClient.loadInbox(c.sub)
+  const inbox = scopedProjectInbox(await inprocClient.loadInbox(c.sub), req)
   const convoIds = [...new Set(inbox.map((m) => m.conversation_id))]
   // Content-blind cost floor (NOT a loop decision). The daemon self-polls every
   // 20s, bypassing the scheduler's fan-out rate limit, so a runaway could spin

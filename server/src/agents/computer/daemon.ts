@@ -59,6 +59,8 @@ import { migrateCodexSession, migrateCodexSessions } from './codex-session-migra
 import { runWithSessionRecovery } from './session-recovery.js'
 import { normalizeAttachments, type AttachmentDescriptor } from '../../../../shared/attachments.js'
 import { AgentAttachmentCache, attachmentImageGuidance, isImageAttachment, renderCachedAttachments, type AttachmentCacheResult } from './attachment-cache.js'
+import { selectProjectInbox, type ProjectWorkspace, type ProjectWorkspaceContext } from '../../../../shared/project-workspaces.js'
+import { inspectProjectWorkspace, withProjectWorkspaceLock, type LocalProjectWorkspace } from './project-workspace.js'
 
 export { conversationHeader }
 
@@ -89,7 +91,8 @@ export function createEngineRescanQueue(
   }
 }
 
-const CONFIG_DIR = join(homedir(), '.cumora')
+// A source-build trial can coexist with the user's published daemon.
+const CONFIG_DIR = process.env.CUMORA_CONFIG_DIR ? resolve(process.env.CUMORA_CONFIG_DIR) : join(homedir(), '.cumora')
 const CONFIG_PATH = join(CONFIG_DIR, 'computer.json')
 const AGENTS_ROOT = join(CONFIG_DIR, 'agents')
 // Per-agent, per-engine session id, persisted OUTSIDE the agent home (so the engine's
@@ -494,6 +497,7 @@ interface DaemonConfig {
 }
 
 interface AgentInfo {
+  projectWorkspaces?: boolean
   providerProfile?: string | null
   id: string
   name: string
@@ -606,6 +610,7 @@ export function enrichCliJsonWithAttachmentPaths(
 }
 
 interface RuntimeInboxResponse {
+  projectWorkspaces?: ProjectWorkspaceContext[]
   rows?: Array<{
     id?: string
     conversation_id?: string
@@ -987,6 +992,12 @@ export function isStaleResumeError(err: string): boolean {
 }
 
 export function authFailureHint(engine: EngineId, detail: string): string {
+  if (engine === 'deepseek') {
+    return 'Configure DEEPSEEK_API_KEY (or the headless profile provider credentials) on that computer, then wake the agent again. GUI sign-ins are not used by the shipped headless profile.'
+  }
+  if (engine === 'mimo') {
+    return 'Open a terminal on that computer and run `mimo auth login`, then wake the agent again.'
+  }
   if (classifyEngineFailure(engineDiagnosticProse(detail)) === 'startup') {
     return 'The local engine could not start. Check the executable path and sandbox configuration on that computer, then wake the agent again.'
   }
@@ -1762,6 +1773,9 @@ export async function writeShim(
       throw new Error(`secure BYOA could not create a trusted shim directory: ${binDir}`)
     }
   }
+  // Source-build instances may live below a package with type=module. These
+  // extensionless Node helpers are CommonJS regardless of the parent's scope.
+  await writeShimFile(join(binDir, 'package.json'), '{"type":"commonjs"}\n', 0o600)
   await writeShimFile(join(binDir, 'cumora'), CUMORA_SHIM, 0o755)
   await writeShimFile(join(binDir, 'cumora-mcp'), CUMORA_MCP_SHIM, 0o755)
   if (platform === 'win32') {
@@ -1976,6 +1990,11 @@ export class AgentRunner {
   private ipcDir: string
   private readonly engine: EngineId
   private readonly sessionStore: EngineSessionStore
+  private readonly sessionsDir = SESSIONS_DIR
+  private projectSessionStore: EngineSessionStore | null = null
+  private localProjectWorkspace: LocalProjectWorkspace | null = null
+  private turnWorkspaceContext: ProjectWorkspaceContext | null = null
+  private inboxProjectScope: string | null | undefined = undefined
   private busy = false
   private pendingRerun = false
   // Triage-trouble backoff: when the small-brain triage is rate-limited OR
@@ -2003,7 +2022,7 @@ export class AgentRunner {
   /** Synthetic work delivered with a wake has no durable chat row. Preserve it
    *  across debounce/coalescing so a brief-only Kanban assignment can drive the
    *  next turn instead of falling into the empty-inbox cost gate. */
-  private pendingBackgroundBrief: WakeBackgroundBrief | null = null
+  private projectBriefQueue: Array<{ conversationId: string | null; brief: WakeBackgroundBrief }> = []
   /** Pre-turn debounce timer (see WAKE_DEBOUNCE_MS). Non-null = a turn is already
    *  scheduled to start shortly; further wakes fold into it instead of stacking. */
   private wakeDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -2155,7 +2174,7 @@ export class AgentRunner {
     if (id === this.sessionId) return
     const previous = this.sessionId
     this.sessionId = id
-    void this.sessionStore.save(id)
+    void (this.projectSessionStore ?? this.sessionStore).save(id)
     if (id) console.log(`[computer] ${this.agent.id} saved ${this.engine} session ${sessionIdPreview(id)}`)
     else if (previous) console.log(`[computer] ${this.agent.id} cleared ${this.engine} session ${sessionIdPreview(previous)}`)
   }
@@ -2163,7 +2182,7 @@ export class AgentRunner {
   /** Defense in depth: the store and adapter are both fixed at construction.
    * Refuse resume if a future refactor ever lets those bindings diverge. */
   private resumeSessionId(): string | null {
-    if (this.engine === this.adapter.id && this.sessionStore.engine === this.engine) return this.sessionId
+    if (this.engine === this.adapter.id && (this.projectSessionStore ?? this.sessionStore).engine === this.engine) return this.sessionId
     console.error(`[computer] ${this.agent.id} refused cross-engine resume: store=${this.sessionStore.engine}, runner=${this.engine}, adapter=${this.adapter.id}`)
     return null
   }
@@ -2247,9 +2266,9 @@ export class AgentRunner {
         this.engineSession = null
         this.logEngineLine(`[engine] persistent session failed to produce a turn (${result.error.slice(0, 160)}) — falling back to one-shot for the rest of this process`)
         result = await this.trackEngineRun(this.adapter.run({
-          home: this.home,
+          home: this.localProjectWorkspace?.directory ?? this.home,
           prompt: this.turnPrompt(null, delta),
-          env: this.engineEnv(),
+          env: this.engineRunEnv(),
           model: this.engineModel(),
           fastModel: this.engineFastModel(),
           nativeFastMode: this.agent.nativeFastMode ?? false,
@@ -2263,9 +2282,9 @@ export class AgentRunner {
       }
     } else {
       result = await this.trackEngineRun(this.adapter.run({
-        home: this.home,
+        home: this.localProjectWorkspace?.directory ?? this.home,
         prompt,
-        env: this.engineEnv(),
+        env: this.engineRunEnv(),
         model: this.engineModel(),
         fastModel: this.engineFastModel(),
         nativeFastMode: this.agent.nativeFastMode ?? false,
@@ -2288,13 +2307,42 @@ export class AgentRunner {
     delta: string,
     localImages: readonly string[] = [],
   ): Promise<EngineRunResult> {
-    const resumeSessionId = this.resumeSessionId()
-    return runWithSessionRecovery({
-      resumeSessionId,
-      run: (resume) => this.runEngineAttempt(delta, resume, localImages),
-      reset: () => this.resetEngineSession(`${this.engine} resume target ${sessionIdPreview(resumeSessionId ?? '')} does not exist`),
-      onFreshRetry: () => console.warn(`[computer] ${this.agent.id} retrying turn once with a fresh ${this.engine} session`),
-    })
+    const binding = this.turnWorkspaceContext?.workspace
+    if (this.turnWorkspaceContext && !binding) throw new Error('This project is bound on another computer. Assign the agent to a computer with a project directory mapping.')
+    const workspace = binding ? await inspectProjectWorkspace(binding) : null
+    const run = async (): Promise<EngineRunResult> => {
+      let currentWorkspace = workspace
+      if (binding) {
+        const current = await runtimeGet<ProjectWorkspaceContext[]>(this.cfg.serverUrl, '/project-workspaces', this.token)
+        if (!current?.some((context) => context.workspace?.id === binding.id)) throw new Error('Project directory binding changed while waiting; retry the task')
+        currentWorkspace = await inspectProjectWorkspace(binding)
+        if (currentWorkspace.directory !== workspace?.directory) throw new Error('The physical project directory changed while waiting; retry the task')
+      }
+      await this.enterProjectWorkspace(currentWorkspace)
+      const resumeSessionId = this.resumeSessionId()
+      return runWithSessionRecovery({
+        resumeSessionId,
+        run: (resume) => this.runEngineAttempt(delta, resume, localImages),
+        reset: () => this.resetEngineSession(`${this.engine} resume target ${sessionIdPreview(resumeSessionId ?? '')} does not exist`),
+        onFreshRetry: () => console.warn(`[computer] ${this.agent.id} retrying turn once with a fresh ${this.engine} session`),
+      })
+    }
+    return workspace ? withProjectWorkspaceLock(workspace.directory, this.teardown.signal, run) : run()
+  }
+
+  private async enterProjectWorkspace(workspace: LocalProjectWorkspace | null): Promise<void> {
+    if ((workspace?.scope ?? null) === (this.localProjectWorkspace?.scope ?? null)) {
+      this.localProjectWorkspace = workspace
+      return
+    }
+    await this.engineSession?.stop({ force: true })
+    this.engineSession = null
+    await (this.projectSessionStore ?? this.sessionStore).flush()
+    this.sessionId = null
+    this.localProjectWorkspace = workspace
+    this.projectSessionStore = workspace ? new EngineSessionStore(this.sessionsDir, this.agent.id, this.engine,
+      `${this.engine === 'codex' ? CODEX_SESSION_SCOPE : providerProfileFingerprint(this.provider)}.project-${workspace.scope}`) : null
+    this.sessionId = await (this.projectSessionStore ?? this.sessionStore).load()
   }
 
   private async loadSessionId(): Promise<void> {
@@ -2393,7 +2441,7 @@ export class AgentRunner {
     await this.attachmentCache.dispose({ purge: options.purgeAttachments === true }).catch((error) => {
       console.warn(`[computer] ${this.agent.id} attachment cache cleanup failed`, error)
     })
-    await this.sessionStore.flush()
+    await (this.projectSessionStore ?? this.sessionStore).flush()
   }
 
   /** Does this runner's live config still match the latest server state? The
@@ -2410,13 +2458,14 @@ export class AgentRunner {
       && this.agent.model === agent.model
       && this.agent.fastModel === agent.fastModel
       && (this.agent.nativeFastMode ?? false) === (agent.nativeFastMode ?? false)
+      && (this.agent.projectWorkspaces ?? false) === (agent.projectWorkspaces ?? false)
   }
 
   private async ensureToken(signal?: AbortSignal): Promise<string> {
     if (this.token && Date.now() < this.tokenExpiresAt - TOKEN_REFRESH_SKEW_MS) return this.token
     const minted = await api<{ token: string; expiresInSeconds: number }>(
       this.cfg.serverUrl, `/api/agents/${this.agent.id}/runtime-token`,
-      { method: 'POST', headers: { Authorization: `Bearer ${this.cfg.deviceToken}` }, body: JSON.stringify({ providerProfile: this.agent.providerProfile ?? null }), signal },
+      { method: 'POST', headers: { Authorization: `Bearer ${this.cfg.deviceToken}` }, body: JSON.stringify({ providerProfile: this.agent.providerProfile ?? null, projectWorkspaces: true }), signal },
     )
     this.token = minted.token
     this.tokenExpiresAt = Date.now() + minted.expiresInSeconds * 1000
@@ -2525,6 +2574,11 @@ export class AgentRunner {
     return this.provider ? providerProfileEnv(env, this.provider) : env
   }
 
+  private engineRunEnv(): NodeJS.ProcessEnv {
+    const env = this.engineEnv()
+    return this.localProjectWorkspace ? { ...env, CUMORA_AGENT_HOME: this.home } : env
+  }
+
   /** The long-lived engine process for this agent (persistent stream-json),
    *  created lazily and reused across wakes so turns 2..N skip the cold start.
    *  Returns null if the engine has no persistent mode (Cursor/OpenCode, Codex
@@ -2533,6 +2587,9 @@ export class AgentRunner {
    *  carries across the restart. */
   private ensureEngineSession(resumeSessionId = this.resumeSessionId()): EngineSession | null {
     if (this.stopped) return null
+    // Project invocations use a real repository cwd, never seed an agent home
+    // there and never reuse a process started in another working directory.
+    if (this.localProjectWorkspace) return null
     if (!this.adapter.startSession) return null
     if (this.persistentUnusable) return null
     if (this.engineSession?.alive) return this.engineSession
@@ -2638,7 +2695,8 @@ export class AgentRunner {
    *  builds the prompt (it has the DB for inbox+context); inference is 100%
    *  local: no network model hop, no sub2api quota (429/503), no big brain. */
   private async inboxTriage(token: string): Promise<RuntimeInboxTriageResponse | null> {
-    const payload = await runtimeGet<RuntimeTriagePayload>(this.cfg.serverUrl, '/inbox-triage/payload', token)
+    const scope = this.inboxProjectScope === undefined ? '' : `?scopeProject=${encodeURIComponent(this.inboxProjectScope ?? '')}`
+    const payload = await runtimeGet<RuntimeTriagePayload>(this.cfg.serverUrl, `/inbox-triage/payload${scope}`, token)
     if (!payload) return null
     if (payload.verdict) return payload.verdict // hard rule / empty inbox — no model needed
     if (!payload.instructions || !payload.input) return null
@@ -2772,6 +2830,8 @@ export class AgentRunner {
     if (this.adapter.id === 'gemini') return 'gemini-2.5-flash-lite'
     if (this.adapter.id === 'qwen') return 'qwen3-coder-flash'
     if (this.adapter.id === 'opencode') return this.agent.model ?? '<opencode-default>'
+    if (this.adapter.id === 'deepseek') return this.agent.model ?? '<deepseek-default>'
+    if (this.adapter.id === 'mimo') return this.agent.model ?? '<mimo-default>'
     if (this.adapter.id === 'pi') return this.agent.model ?? '<pi-default>'
     if (this.adapter.id === 'antigravity') return this.agent.model ?? 'gemini-3.8-flash-high'
     if (this.adapter.id === 'zcode') return this.agent.model ?? '<zcode-default>'
@@ -2820,10 +2880,27 @@ export class AgentRunner {
     } catch { return null }
   }
 
-  private async snapshotUnread(token: string): Promise<{ seen: Map<string, string>; digest: string; hasReal: boolean; projectIds: string[]; imagePaths: string[] }> {
-    const inbox = await runtimeGet<RuntimeInboxResponse>(this.cfg.serverUrl, '/inbox', token)
+  private async snapshotUnread(token: string, conversationId?: string | null, manual = false, attempted: ReadonlySet<string | null> = new Set()): Promise<{ seen: Map<string, string>; digest: string; hasReal: boolean; projectIds: string[]; imagePaths: string[]; exhausted?: boolean }> {
+    let inbox = await runtimeGet<RuntimeInboxResponse>(this.cfg.serverUrl, '/inbox?workspaceContext=1', token)
     this.lastInboxDrainAt = inbox ? Date.now() : 0
     if (!inbox) throw new Error('inbox fetch failed')
+    const contexts = inbox.projectWorkspaces ?? []
+    const selected = selectProjectInbox(inbox.rows ?? [], contexts, conversationId, attempted)
+    if (selected.exhausted && !manual) return { seen: new Map(), digest: '', hasReal: false, projectIds: [], imagePaths: [], exhausted: true }
+    if (manual && contexts.length) {
+      const scope = conversationId ? await runtimeGet<{ projectId: string | null }>(this.cfg.serverUrl,
+        `/project-scope?conversationId=${encodeURIComponent(conversationId)}`, token) : { projectId: null }
+      if (!scope) throw new Error('Cannot determine the manual task project')
+      selected.projectId = scope.projectId
+      selected.remaining = (inbox.rows ?? []).some((row) => (row.project_id ?? null) !== scope.projectId && !attempted.has(row.project_id ?? null))
+    }
+    this.inboxProjectScope = selected.scoped ? selected.projectId : undefined
+    this.turnWorkspaceContext = selected.scoped ? contexts.find((context) => context.projectId === selected.projectId) ?? null : null
+    if (selected.scoped) {
+      inbox = await runtimeGet<RuntimeInboxResponse>(this.cfg.serverUrl, `/inbox?scopeProject=${encodeURIComponent(selected.projectId ?? '')}`, token)
+      if (!inbox) throw new Error('Project inbox fetch failed')
+      if (selected.remaining) this.pendingRerun = true
+    }
     const seen = new Map<string, string>()
     // Unread grouped BY CONVERSATION (first-seen order), each with the header
     // (title + topic) the cloud agent's context also carries — so a BYOA agent
@@ -2886,7 +2963,8 @@ export class AgentRunner {
       if (block) attachmentBlocks.push(`Message ${row.id}:\n${block}`)
     }
     const projectIds = uniqueProjectIds(
-      (inbox?.rows ?? []).map((r) => (typeof r.project_id === 'string' ? r.project_id : null)),
+      [...(selected.scoped && selected.projectId ? [selected.projectId] : []),
+        ...(inbox?.rows ?? []).map((r) => (typeof r.project_id === 'string' ? r.project_id : null))],
     )
     const digest = renderInboxDigest(byConvo)
     return {
@@ -2966,9 +3044,20 @@ export class AgentRunner {
     // WORKING A BOARD CARD — none of those existed at 5/28 when coord was perfect,
     // ergo none of them are required for coord). The agent discovers other CLI
     // surface via `cumora <cmd> --help` when it needs it.
-    return (
+    const workspace = this.localProjectWorkspace
+    const projectPrompt = workspace
+      ? `Project working directory: ${JSON.stringify(workspace.directory)}. Work on project files here. ` +
+        `Read and follow applicable repository instructions, including nested AGENTS.md before editing subdirectories. ` +
+        `Do not initialize or replace Git metadata. Preserve unrelated files and uncommitted work. ` +
+        `Your Cumora identity is ${this.agent.name}${this.agent.role ? ` (${this.agent.role})` : ''}.\n` +
+        `${this.agent.systemPrompt ?? ''}\n` +
+        `Your separate agent home is ${JSON.stringify(this.home)}. All memory/ paths below refer to that agent home, not this repository. ` +
+        `Keep personal memory, persona and runtime files out of the project directory.\n` +
+        (workspace.instructions ? `Repository AGENTS.md:\n${workspace.instructions}\n\n` : '')
+      : ''
+    return projectPrompt + (
       `You are a Cumora teammate — a first-class member of this team with your own voice. ` +
-      actionSurfaceText(this.promptSurface()) +
+      actionSurfaceText(this.promptSurface(), !!workspace) +
       `Read the relevant thread and respond appropriately, in your own voice — like a real teammate. ` +
       `If a human addressed the whole team, you and every peer likely woke at the same instant, so ` +
       `coordinate via the protocol below — in short: post the real next item from what's ACTUALLY been posted, ` +
@@ -2976,7 +3065,7 @@ export class AgentRunner {
       // The shared glance-and-yield protocol — verbatim via the const so BYOA
       // coordinates identically to the cloud pod-agent.
       GLANCE_YIELD_RULES + `\n\n` +
-      postingMechanicsText(this.promptSurface()) +
+      postingMechanicsText(this.promptSurface(), workspace ? join(this.home, 'notes') : undefined) +
       `After your work is complete and your final \`cumora reply\` returns success, end the turn. ` +
       `Do NOT restate it, summarise it, or narrate what you just did. ` +
       `A progress update or a brief reply to a mid-task ping does not complete your task — continue the work. ` +
@@ -3001,7 +3090,7 @@ export class AgentRunner {
       `"still need X?") and schedule your own check-back: ` +
       calendarExampleText(this.promptSurface(), this.agent.id) +
       `Stop only when the work is truly done or it's someone else's move.\n\n` +
-      `Privacy: stay inside your home directory. Never read or expose files outside it — this machine ` +
+      `Privacy: stay inside ${workspace ? 'the bound project directory and your separate agent home' : 'your home directory'}. Never read or expose files outside these locations — this machine ` +
       `holds the operator's private files.`
     )
   }
@@ -3141,6 +3230,9 @@ export class AgentRunner {
         runtimeGet<{ roster: string }>(this.cfg.serverUrl, '/roster', token).then((r) => r?.roster ?? '').catch(() => ''),
       ])
       this.teardown.signal.throwIfAborted()
+      // Global board/agenda work has no project identity. Never reuse the
+      // repository of the preceding chat turn for an unscoped task.
+      this.turnWorkspaceContext = null
       const result = await this.runWithSessionRecovery(this.agendaDelta(ag.brief, memoryDigest, roster))
       exitCode = result.exitCode
       turnUsage = result.usage
@@ -3217,16 +3309,21 @@ export class AgentRunner {
    *  wake ARMS a short timer; subsequent wakes within the window fold in (return
    *  early). When it fires we run ONE turn that snapshots ALL unread — so a burst
    *  becomes a single big-engine spawn. The poll path and SSE wakes route here. */
+  private queueBackgroundBrief(brief: WakeBackgroundBrief, conversationId: string | null): void {
+    // Keep the conversation identity even before discovery observes a new
+    // binding; merging here would make its project impossible to recover.
+    const queued = this.projectBriefQueue.find((entry) => entry.conversationId === conversationId)
+    if (queued) queued.brief = mergeWakeBackgroundBriefs(queued.brief, brief) ?? brief
+    else this.projectBriefQueue.push({ conversationId, brief })
+  }
+
   private scheduleWake(
     reason: string,
     convo?: string | null,
     backgroundBrief?: WakeBackgroundBrief | null,
   ): void {
     if (this.stopped) return
-    this.pendingBackgroundBrief = mergeWakeBackgroundBriefs(
-      this.pendingBackgroundBrief,
-      backgroundBrief,
-    )
+    if (backgroundBrief) this.queueBackgroundBrief(backgroundBrief, convo ?? null)
     if (this.busy) {
       // A turn is already running. Coalesce as usual (the rerun re-reads the inbox),
       // BUT if this wake is a DIRECT ping, STEER it into the running turn so the
@@ -3261,6 +3358,9 @@ export class AgentRunner {
     this.sideSteering = true
     try {
       await this.ensureToken()
+      // A ping for another project must stay queued; injecting it into a live
+      // process could execute its instructions in the wrong repository.
+      if (this.agent.projectWorkspaces) return
       // PROBE: this is the "should I steer?" check — we filter by direct/
       // mention/human below, and only ~20% of probes actually result in a
       // steer (most wakes are group chatter, not direct). Use ?probe=1 so
@@ -3269,7 +3369,8 @@ export class AgentRunner {
       // the actual steer text, and any duplicate-collision risk remains
       // protected by cmdReply's preflight against the baseline that
       // snapshotUnread set at the start of this turn.
-      const inbox = await runtimeGet<RuntimeInboxResponse>(this.cfg.serverUrl, '/inbox?probe=1', this.token)
+      const inbox = await runtimeGet<RuntimeInboxResponse>(this.cfg.serverUrl, '/inbox?probe=1&workspaceContext=1', this.token)
+      if (!inbox || inbox.projectWorkspaces?.length) return
       const rows = (inbox?.rows ?? []).filter((r) => r.conversation_id === convo)
       if (rows.length === 0) return
       const direct = rows.some((r) =>
@@ -3338,6 +3439,8 @@ export class AgentRunner {
     // carrying it forward would silently starve every later turn's pings.
     this.steerBudget = { steers: 0, chars: 0, maxSteers: MAX_STEERS_PER_TURN, maxChars: MAX_STEER_CHARS_PER_TURN }
     let activeBackgroundBrief: WakeBackgroundBrief | null = null
+    let activeBriefConversation: string | null = null
+    const attemptedProjectScopes = new Set<string | null>()
     try {
       do {
         this.pendingRerun = false
@@ -3367,15 +3470,19 @@ export class AgentRunner {
         // can't flash phantom "typing" in whatever conversation last woke us.
         // (The fallback below is derived from CURRENTLY unread messages, so it
         // can't go stale the way a leftover wake value could.)
-        const wakeConvo = this.lastWakeConvo
+        const queuedBrief = this.projectBriefQueue.shift()
+        const wakeConvo = queuedBrief ? queuedBrief.conversationId : this.lastWakeConvo
         this.lastWakeConvo = null
-        activeBackgroundBrief = this.pendingBackgroundBrief
-        this.pendingBackgroundBrief = null
+        activeBriefConversation = wakeConvo
+        activeBackgroundBrief = queuedBrief?.brief ?? null
+        if (this.projectBriefQueue.length > 0) this.pendingRerun = true
         // Snapshot what's unread BEFORE triaging, so triage provably sees a
         // superset of what we may ack — a real task that lands during/after
         // triage keeps a higher id, stays out of `seen`, and so survives to
         // drive the coalesced rerun rather than being silently acked away.
-        const { seen, digest, hasReal, projectIds, imagePaths } = await this.snapshotUnread(token)
+        const { seen, digest, hasReal, projectIds, imagePaths, exhausted } = await this.snapshotUnread(token, wakeConvo, !!activeBackgroundBrief, attemptedProjectScopes)
+        if (exhausted) break
+        if (this.inboxProjectScope !== undefined) attemptedProjectScopes.add(this.inboxProjectScope)
         // Which conversation should show "<agent> is typing…"? Prefer the one the
         // wake named, but fall back to the unread we just snapshotted, because a
         // wake often carries no conversation at all:
@@ -3389,7 +3496,8 @@ export class AgentRunner {
         // Both cases are exactly when a human IS waiting, and with no indicator
         // the agent reads as dead: it can work for minutes — engine spawned, turn
         // running — while the room shows nothing at all.
-        const convo = typingConversation(wakeConvo, seen)
+        const scopedWake = this.inboxProjectScope !== undefined && !activeBackgroundBrief && wakeConvo && !seen.has(wakeConvo) ? null : wakeConvo
+        const convo = typingConversation(scopedWake, seen)
         // HARD COST GATE (content-blind, fail-closed): system-only inbox noise
         // is not a task. A validated manual backgroundBrief IS a task, though:
         // Kanban assignment/mention wakes deliberately have no chat row, and
@@ -3639,10 +3747,8 @@ export class AgentRunner {
           })
         }
         if (engineError && activeBackgroundBrief) {
-          this.pendingBackgroundBrief = mergeWakeBackgroundBriefs(
-            activeBackgroundBrief,
-            this.pendingBackgroundBrief,
-          )
+          this.queueBackgroundBrief(activeBackgroundBrief, activeBriefConversation)
+          this.pendingRerun = false
         }
         activeBackgroundBrief = null
         // Clean turn → ack everything this turn saw. If the engine replied it
@@ -3661,10 +3767,7 @@ export class AgentRunner {
       } while (this.pendingRerun && !this.stopped)
     } catch (err) {
       if (activeBackgroundBrief) {
-        this.pendingBackgroundBrief = mergeWakeBackgroundBriefs(
-          activeBackgroundBrief,
-          this.pendingBackgroundBrief,
-        )
+        this.queueBackgroundBrief(activeBackgroundBrief, activeBriefConversation)
         activeBackgroundBrief = null
       }
       // A turn-level failure — token mint 502 (e.g. a server pod rolling), a
@@ -3798,6 +3901,7 @@ async function doRun(serverOverride?: string): Promise<void> {
     for (const name of [
       'CUMORA_CLAUDE_ARGS', 'CUMORA_CODEX_ARGS', 'CUMORA_GROK_ARGS',
       'CUMORA_CURSOR_ARGS', 'CUMORA_OPENCODE_ARGS', 'CUMORA_PI_ARGS',
+      'CUMORA_MIMO_ARGS',
       'CUMORA_GEMINI_ARGS', 'CUMORA_TRIAGE_ARGS',
     ]) {
       if (process.env[name]) console.warn(`[computer] ignoring ${name}: custom engine argv requires CUMORA_BYOA_ALLOW_UNSANDBOXED=1`)
@@ -3853,9 +3957,24 @@ async function doRun(serverOverride?: string): Promise<void> {
   const engineInventoryStabilizer = new EngineInventoryStabilizer()
 
   const syncOnce = async (): Promise<void> => {
+    // Validate on the owning computer, even if it currently hosts no agents.
+    // Never ask the API server to interpret or access a local path.
+    try {
+      const bindings = await api<ProjectWorkspace[]>(cfg.serverUrl, '/api/computers/me/project-workspaces', {
+        headers: { Authorization: `Bearer ${cfg.deviceToken}` },
+      })
+      for (const binding of bindings) {
+        let report: { status: 'ready'; isGit: boolean } | { status: 'error'; error: string }
+        try { report = { status: 'ready', isGit: (await inspectProjectWorkspace(binding)).isGit } }
+        catch (error) { report = { status: 'error', error: error instanceof Error ? error.message : String(error) } }
+        await api(cfg.serverUrl, `/api/computers/me/project-workspaces/${encodeURIComponent(binding.id)}/status`, {
+          method: 'POST', headers: { Authorization: `Bearer ${cfg.deviceToken}` }, body: JSON.stringify(report),
+        })
+      }
+    } catch (error) { console.warn('[computer] project directory validation failed:', error instanceof Error ? error.message : String(error)) }
     let agents: AgentInfo[]
     try {
-      agents = await api<AgentInfo[]>(cfg.serverUrl, '/api/computers/me/agents?providerProfiles=1', {
+      agents = await api<AgentInfo[]>(cfg.serverUrl, '/api/computers/me/agents?providerProfiles=1&projectWorkspaces=1', {
         headers: { Authorization: `Bearer ${cfg.deviceToken}` },
       })
     } catch (err) {
@@ -3913,7 +4032,7 @@ async function doRun(serverOverride?: string): Promise<void> {
             if (!failure.token || Date.now() >= failure.tokenExpiresAt - TOKEN_REFRESH_SKEW_MS) {
               const { token, expiresInSeconds } = await api<{ token: string; expiresInSeconds: number }>(cfg.serverUrl, `/api/agents/${agent.id}/runtime-token`, {
                 method: 'POST', headers: { Authorization: `Bearer ${cfg.deviceToken}` },
-                body: JSON.stringify({ providerProfile: agent.providerProfile ?? null }),
+                body: JSON.stringify({ providerProfile: agent.providerProfile ?? null, projectWorkspaces: true }),
               })
               failure.token = token
               failure.tokenExpiresAt = Date.now() + expiresInSeconds * 1000
@@ -4267,6 +4386,7 @@ async function doRun(serverOverride?: string): Promise<void> {
  *  exit cleanly so the service relaunches on `cumora@latest` (= the update);
  *  otherwise just log that an update is available. Never throws. */
 async function checkForUpdate(onSupervisedUpdate: () => void): Promise<void> {
+  if (process.env.CUMORA_AUTO_UPDATE === '0') return
   try {
     const res = await fetch('https://registry.npmjs.org/cumora/latest', { headers: { Accept: 'application/json' } })
     if (!res.ok) return
@@ -5141,6 +5261,9 @@ async function runDoctor(providerId?: string): Promise<void> {
 
 export async function runComputerDaemon(argv: string[]): Promise<void> {
   const args = parseArgs(argv)
+  if (process.env.CUMORA_CONFIG_DIR && (args.pair || args.installService || args.uninstallService || args.restart || args.stop || args.status || args.migrateCodexSessions)) {
+    throw new Error('An isolated source-build instance is managed by scripts/local-pc.ps1; built-in service commands manage the published default instance')
+  }
   if (args.provider !== undefined && !args.doctor) throw new Error('--provider requires --doctor')
   const serverUrl = (args.server || DEFAULT_SERVER).replace(/\/+$/, '')
   if (args.help) { console.log(helpText()); return }

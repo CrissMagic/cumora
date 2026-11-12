@@ -46,6 +46,14 @@ export interface EngineModelCatalog {
 }
 
 const PRESETS: Record<EngineId, EngineModelCatalog> = {
+  deepseek: {
+    models: [], defaultModel: null, defaultFastModel: null,
+    prefersLocalDefault: true, supportsCustom: true, fastModelScope: 'agent', source: 'presets',
+  },
+  mimo: {
+    models: [], defaultModel: null, defaultFastModel: null,
+    prefersLocalDefault: true, supportsCustom: true, fastModelScope: 'agent', source: 'presets',
+  },
   claude: {
     models: [
       { id: 'opus', label: 'Opus', recommendedFor: ['big'] },
@@ -462,7 +470,7 @@ export async function discoverEngineModelCatalog(
   // Native listings already resolve all configured backend providers. Re-read
   // them on a rescan rather than caching under an unknown connection identity.
   const listing = {
-    cursor: ['models', 'cursor'], opencode: ['models', 'provider'],
+    cursor: ['models', 'cursor'], opencode: ['models', 'provider'], mimo: ['models', 'provider'],
     pi: ['--list-models', 'pi'], antigravity: ['models', 'antigravity'],
     grok: ['models', 'cursor'],
   } as const

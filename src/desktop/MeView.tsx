@@ -12,6 +12,7 @@ import { Checkbox } from '@/components/Checkbox'
 import { Combobox } from '@/components/Combobox'
 import { AppearancePicker, ChatLayoutPicker } from '@/components/AppearancePicker'
 import { LanguagePicker } from '@/components/LanguagePicker'
+import { ProjectWorkspaceSettings } from '@/components/ProjectWorkspaceSettings'
 import { useT, type MessageKey } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 import { api, getPairingServerOrigin, getServerOrigin, type ApiProject, type ApiQuotaSnapshot, type ApiQuotaWindow } from '@/api/client'
@@ -509,6 +510,7 @@ function Stat({ n, l, tone }: { n: number; l: MessageKey; tone: 'good' | 'warn' 
 
 function ProjectsTab() {
   const t = useT()
+  const companyId = useAuth((s) => s.activeCompanyId)
   const [projects, setProjects] = useState<ApiProject[]>([])
   const [showArchived, setShowArchived] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -520,7 +522,7 @@ function ProjectsTab() {
   const refresh = () => {
     void api.listProjects().then(setProjects).catch(() => { /* ignore */ })
   }
-  useEffect(refresh, [])
+  useEffect(refresh, [companyId])
 
   const create = async () => {
     const trimmed = name.trim()
@@ -572,6 +574,7 @@ function ProjectsTab() {
                   <div className="font-display italic text-[12px] text-ink-500 truncate">
                     {p.description || t('me.noDescription')}  ·  {count === 1 ? t('me.projectConvoCount', { n: count }) : t('me.projectConvoCountPlural', { n: count })}
                   </div>
+                  <ProjectWorkspaceSettings projectId={p.id} archived={p.status === 'archived'} />
                 </div>
                 <button
                   type="button"

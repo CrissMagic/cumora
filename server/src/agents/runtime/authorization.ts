@@ -11,7 +11,7 @@ import type { AgentRuntimeClaims } from './jwt.js'
  * case where tenant and Computer values end up equal again.
  */
 export async function isRuntimeAgentAuthorized(
-  claims: Pick<AgentRuntimeClaims, 'sub' | 'companyId' | 'computerId' | 'assignmentId'>,
+  claims: Pick<AgentRuntimeClaims, 'sub' | 'companyId' | 'computerId' | 'assignmentId' | 'projectWorkspaces'>,
 ): Promise<boolean> {
   if (!claims.companyId) return false
   const { rowCount } = await pool.query(
@@ -26,8 +26,12 @@ export async function isRuntimeAgentAuthorized(
         AND p.runtime_assignment_id = $4
         AND p.kind = 'agent' AND p.departed_at IS NULL
         AND (p.computer_id IS NULL OR c.id IS NOT NULL)
+        AND ($5::boolean OR c.kind IS NULL OR c.kind = 'cloud' OR NOT EXISTS (
+          SELECT 1 FROM conversation_members cm JOIN conversations cv ON cv.id = cm.conversation_id AND cv.company_id = cm.company_id
+            JOIN project_workspaces w ON w.project_id = cv.project_id
+           WHERE cm.participant_id = p.id AND cm.company_id = p.company_id))
       LIMIT 1`,
-    [claims.sub, claims.companyId, claims.computerId, claims.assignmentId],
+    [claims.sub, claims.companyId, claims.computerId, claims.assignmentId, claims.projectWorkspaces === true],
   )
   return rowCount === 1
 }

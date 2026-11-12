@@ -51,7 +51,9 @@
     "mobile:ios": "npm run mobile:sync && npx cap open ios",
     "mobile:ios:run": "npm run mobile:sync && npx cap run ios",
     "mobile:android": "npm run mobile:sync && npx cap open android",
-    "mobile:android:run": "npm run mobile:sync && npx cap run android"
+    "mobile:android:run": "npm run mobile:sync && npx cap run android",
+    "android:sync": "npm run build && cap sync android",
+    "android:build": "npm run android:sync && node scripts/build-android.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1045.0",

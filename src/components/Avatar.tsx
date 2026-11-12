@@ -45,13 +45,15 @@ export function Avatar({ p, size = 44, showStatus = true, statusOverride, ringCo
   const style: CSSProperties = {
     width: size,
     height: size,
-    background: showImg ? 'transparent' : p.avatarBg,
+    // Keep the identity visible while a remote image is still loading.
+    background: p.avatarBg,
     fontSize,
   }
 
   return (
     <div className={cn('relative inline-grid place-items-center rounded-full font-display font-medium text-white tracking-tight shrink-0', className)} style={style}>
-      {showImg ? (
+      <span aria-hidden="true" style={{ letterSpacing: '-0.02em' }}>{p.initial}</span>
+      {showImg && (
         <img
           key={imgKey}
           src={cachedSrc ?? ''}
@@ -60,8 +62,6 @@ export function Avatar({ p, size = 44, showStatus = true, statusOverride, ringCo
           loading={AVATAR_IMG_LOADING}
           onError={onError}
         />
-      ) : (
-        <span style={{ letterSpacing: '-0.02em' }}>{p.initial}</span>
       )}
       {showStatus && (
         <span
@@ -89,21 +89,20 @@ export function AvatarMini({ p, size = 28, ringColor = 'var(--cloud)' }: { p: Pa
       style={{
         width: size,
         height: size,
-        background: showImg ? 'transparent' : p.avatarBg,
+        background: p.avatarBg,
         border: `2.5px solid ${ringColor}`,
         fontSize: Math.round(size * 0.4),
       }}
     >
-      {showImg
-        ? <img
+      <span aria-hidden="true">{p.initial}</span>
+      {showImg && <img
             key={imgKey}
             src={cachedSrc ?? ''}
             alt={p.name}
             className="absolute inset-0 w-full h-full object-cover rounded-full"
             loading={AVATAR_IMG_LOADING}
             onError={onError}
-          />
-        : p.initial}
+        />}
     </div>
   )
 }

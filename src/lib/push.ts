@@ -47,11 +47,13 @@ interface ActionPerformed {
 
 /** Lazy-imported because the plugin only exists in the native bundle.
  *  Importing at module top-level would crash the web build. */
-async function loadPlugin(): Promise<CapacitorPushNotifications | null> {
+async function loadPlugin(): Promise<{ plugin: CapacitorPushNotifications } | null> {
   if (!isCapacitorNative) return null
   try {
     const mod = await import('@capacitor/push-notifications')
-    return mod.PushNotifications as unknown as CapacitorPushNotifications
+    // Capacitor proxies synthesize arbitrary methods, including `then`.
+    // Never return a proxy directly from async: Promise assimilation calls it.
+    return { plugin: mod.PushNotifications as unknown as CapacitorPushNotifications }
   } catch (e) {
     console.warn('[push] @capacitor/push-notifications unavailable', e)
     return null
@@ -150,7 +152,8 @@ export async function initPushNotifications(opts: { force?: boolean } = {}): Pro
   // attached to the device, so when a user reports "no push", we can ask
   // them to attach the Web Inspector and read the trace.
   console.log('[push] init begin force=', opts.force, 'native=', isCapacitorNative)
-  const PushNotifications = await loadPlugin()
+  const loadedPlugin = await loadPlugin()
+  const PushNotifications = loadedPlugin?.plugin
   if (!PushNotifications) {
     lastError = isCapacitorNative
       ? '@capacitor/push-notifications failed to load — was the plugin bundled into this build?'
@@ -296,7 +299,8 @@ function installVisibilityHook(): void {
  *  drop any delivered banners from the lock screen. Safe to call when
  *  push was never enabled — every step swallows its own errors. */
 export async function teardownPushNotifications(): Promise<void> {
-  const PushNotifications = await loadPlugin()
+  const loadedPlugin = await loadPlugin()
+  const PushNotifications = loadedPlugin?.plugin
   if (!PushNotifications) return
   if (activeToken) {
     try { await api.unregisterPushDevice({ token: activeToken }) }

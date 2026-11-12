@@ -3,6 +3,7 @@
  * teammates (active agents + other humans). Yetone is auto-included.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api, type ApiProject } from '@/api/client'
 import { useMe } from '@/stores/auth'
 import { useParticipants } from '@/stores/participants'
@@ -17,9 +18,11 @@ interface Props {
   onClose: () => void
   /** participant ids to pre-select (e.g. when entering from a direct-chat right-click) */
   initialPicked?: string[]
+  project?: { id: string; name: string; computerIds: string[] }
+  sheet?: boolean
 }
 
-export function GroupCreator({ onClose, initialPicked }: Props) {
+export function GroupCreator({ onClose, initialPicked, project, sheet = false }: Props) {
   const t = useT()
   const byId = useParticipants((s) => s.byId)
   const select = useApp((s) => s.selectConversation)
@@ -28,18 +31,18 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
 
   const candidates = useMemo<Participant[]>(() => {
     return Object.values(byId)
-      .filter((p) => p.id !== meId && !p.departedAt)
+      .filter((p) => p.id !== meId && !p.departedAt && (!project || p.kind === 'human' || project.computerIds.includes(p.computerId ?? '')))
       .sort((a, b) => {
         // Agents first, then humans, then alphabetical.
         if (a.kind !== b.kind) return a.kind === 'agent' ? -1 : 1
         return a.name.localeCompare(b.name)
       })
-  }, [byId, meId])
+  }, [byId, meId, project?.computerIds])
 
   const [title, setTitle] = useState('')
-  const [picked, setPicked] = useState<Set<string>>(() => new Set(initialPicked ?? []))
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(project ? (initialPicked ?? []).filter((id) => candidates.some((p) => p.id === id)) : initialPicked ?? []))
   const [projects, setProjects] = useState<ApiProject[]>([])
-  const [projectId, setProjectId] = useState<string | null>(null)
+  const [projectId, setProjectId] = useState<string | null>(project?.id ?? null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -50,10 +53,11 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
   }, [onClose])
 
   useEffect(() => {
+    if (project) return
     void api.listProjects()
       .then((list) => setProjects(list.filter((p) => p.status === 'active')))
       .catch(() => { /* ignore — picker just hides */ })
-  }, [])
+  }, [project?.id])
 
   const toggle = (id: string) => {
     setPicked((s) => {
@@ -83,7 +87,7 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
     if (!finalTitle) { setErr(t('group.addTitle')); return }
     setBusy(true)
     try {
-      const r = await api.createGroup({ title: finalTitle, members: [...picked], projectId })
+      const r = await api.createGroup({ title: finalTitle, members: [...picked], projectId: project?.id ?? projectId })
       await useConversations.getState().reload()
       setView('conversations')
       select(r.id)
@@ -97,34 +101,35 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
 
   const canSubmit = picked.size > 0 && !busy
 
-  return (
+  const content = (
     <div
-      className="fixed inset-0 z-50 grid place-items-center p-6"
-      style={{ background: 'rgba(15, 30, 50, 0.55)', backdropFilter: 'blur(6px)' }}
+      className={sheet ? 'fixed inset-0 z-50 flex items-end' : 'fixed inset-0 z-50 grid place-items-center p-6'}
+      style={sheet ? { background: 'rgba(0, 0, 0, 0.3)' } : { background: 'rgba(15, 30, 50, 0.55)', backdropFilter: 'blur(6px)' }}
       onClick={onClose}
     >
       <div
-        className="bg-cloud rounded-[18px] shadow-pop w-full max-w-[520px] max-h-[88vh] flex flex-col overflow-hidden"
-        style={{ border: '1px solid var(--ink-100)' }}
+        role="dialog" aria-modal="true" aria-labelledby="group-creator-title"
+        className={sheet ? 'bg-cloud rounded-t-[24px] w-full max-h-[85dvh] flex flex-col overflow-hidden' : 'bg-cloud rounded-[18px] shadow-pop w-full max-w-[520px] max-h-[88vh] flex flex-col overflow-hidden'}
+        style={sheet ? { paddingBottom: 'env(safe-area-inset-bottom)' } : { border: '1px solid var(--ink-100)' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-6 py-5 border-b border-ink-100 shrink-0">
-          <h2 className="font-display font-medium text-[20px] tracking-tight">{t('group.title')}</h2>
-          <div className="text-[12.5px] text-ink-500 italic font-display mt-0.5">
+          <h2 id="group-creator-title" className="font-display font-medium text-[20px] tracking-tight">{t(sheet ? 'mprojects.newChat' : 'group.title')}</h2>
+          {!sheet && <div className="text-[12.5px] text-ink-500 italic font-display mt-0.5">
             {t('group.intro')}
-          </div>
+          </div>}
         </div>
 
         <div className="px-6 py-5 overflow-y-auto flex-1 min-h-0">
-          <label className="block text-[11px] font-bold tracking-wider uppercase text-ink-500 mb-1">
+          <label className={sheet ? 'block text-[14px] font-medium text-ink-900 mb-2' : 'block text-[11px] font-bold tracking-wider uppercase text-ink-500 mb-1'}>
             {t('group.fieldTitle')}
             <span className="ml-1.5 text-ink-300 normal-case font-medium tracking-normal">{t('group.fieldOptional')}</span>
           </label>
-          <div className="text-[11.5px] text-ink-300 mb-1.5 font-display italic">
+          {!sheet && <div className="text-[11.5px] text-ink-300 mb-1.5 font-display italic">
             {autoTitle
               ? t('group.leaveBlankTo', { title: autoTitle })
               : t('group.whatIsAbout')}
-          </div>
+          </div>}
           <Input
             type="text"
             value={title}
@@ -135,7 +140,11 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
             maxLength={80}
           />
 
-          {projects.length > 0 && (
+          {project && <div className="mb-5 rounded-xl border border-ink-100 bg-paper p-3 text-[14px] text-ink-700">
+            {project.name}
+            {!candidates.some((p) => p.kind === 'agent') && <p className="mt-2 text-[13px] text-ink-500">{t('mprojects.noAgent')}</p>}
+          </div>}
+          {!project && projects.length > 0 && (
             <>
               <label className="block text-[11px] font-bold tracking-wider uppercase text-ink-500 mb-1">
                 {t('group.fieldProject')}
@@ -175,10 +184,10 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
             </>
           )}
 
-          <label className="block text-[11px] font-bold tracking-wider uppercase text-ink-500 mb-1">{t('group.fieldMembers')}</label>
-          <div className="text-[11.5px] text-ink-300 mb-2 font-display italic">
+          <label className={sheet ? 'block text-[14px] font-medium text-ink-900 mb-2' : 'block text-[11px] font-bold tracking-wider uppercase text-ink-500 mb-1'}>{t('group.fieldMembers')}</label>
+          {!sheet && <div className="text-[11.5px] text-ink-300 mb-2 font-display italic">
             {picked.size === 0 ? t('group.clickToAdd') : t('group.nSelected', { n: picked.size })}
-          </div>
+          </div>}
           <div className="grid grid-cols-1 gap-1.5">
             {candidates.map((p) => {
               const on = picked.has(p.id)
@@ -230,7 +239,7 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="px-4 py-2 rounded-[9px] text-[12.5px] font-semibold text-ink-700 bg-cloud hover:bg-sky2-50 transition"
+            className={sheet ? 'min-h-11 px-4 py-2 rounded-xl text-[14px] font-semibold text-ink-700 bg-cloud' : 'px-4 py-2 rounded-[9px] text-[12.5px] font-semibold text-ink-700 bg-cloud hover:bg-sky2-50 transition'}
             style={{ border: '1px solid var(--ink-100)' }}
           >{t('group.cancelBtn')}</button>
           <div className="flex-1" />
@@ -238,14 +247,14 @@ export function GroupCreator({ onClose, initialPicked }: Props) {
             type="button"
             onClick={submit}
             disabled={!canSubmit}
-            className="px-5 py-2 rounded-[9px] text-[12.5px] font-semibold text-white transition disabled:opacity-50"
+            className={sheet ? 'min-h-11 px-5 py-2 rounded-xl text-[14px] font-semibold text-cloud bg-ink-900 disabled:opacity-50' : 'px-5 py-2 rounded-[9px] text-[12.5px] font-semibold text-white transition disabled:opacity-50'}
             style={{
-              background: 'var(--skype)',
-              boxShadow: '0 4px 12px -3px rgba(0, 168, 240, 0.5)',
+              ...(!sheet && { background: 'var(--skype)', boxShadow: '0 4px 12px -3px rgba(0, 168, 240, 0.5)' }),
             }}
-          >{busy ? t('group.creatingBtn') : (picked.size > 0 ? t('group.createBtnWithCount', { n: picked.size + 1 }) : t('group.createBtn'))}</button>
+          >{busy ? t('group.creatingBtn') : sheet ? t('mprojects.startChat') : (picked.size > 0 ? t('group.createBtnWithCount', { n: picked.size + 1 }) : t('group.createBtn'))}</button>
         </div>
       </div>
     </div>
   )
+  return sheet ? createPortal(content, document.body) : content
 }

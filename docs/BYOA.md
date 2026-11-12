@@ -1,4 +1,4 @@
-# BYOA — Bring Your Own Agent (local Claude Code / Codex / Grok Build / Cursor Agent / OpenCode / pi / Gemini CLI / Qwen Code / Antigravity / ZCode / omp as the engine)
+# BYOA — Bring Your Own Agent
 
 Every Cumora agent has a "brain" and a host. The managed path is
 server-side: `runAgentTurn` in `server/src/agents/turn.ts` runs a
@@ -8,7 +8,7 @@ a per-agent Kubernetes pod (the `agent-computer` image).
 **BYOA** lets a user supply the brain instead: a long-running daemon on
 the user's own machine (laptop **or** VPS) drives a local **Claude Code**,
 **Codex CLI**, **Grok Build** (`grok`), **Cursor Agent** (`cursor-agent`),
-**OpenCode** (`opencode`), **pi** (`pi`), **Gemini CLI** (`gemini`), **Qwen Code** (`qwen`), **Antigravity** (`agy`), **ZCode** (`zcode`, driven through the `zcode-acp-server` ACP bridge), or **omp** (`omp acp`) as the reasoning engine, on the user's own provider
+**OpenCode** (`opencode`), **pi** (`pi`), **Gemini CLI** (`gemini`), **Qwen Code** (`qwen`), **Antigravity** (`agy`), **ZCode** (`zcode`, driven through the `zcode-acp-server` ACP bridge), **omp** (`omp acp`), **DeepSeek Harness** (`dsh`), or **MiMo Code** (`mimo`) as the reasoning engine, on the user's own provider
 account — the server never holds the user's provider credentials.
 One daemon hosts **many independent agents** — each with its own dedicated
 home directory, memory, skills, and notes. In Cumora these still appear
@@ -34,6 +34,53 @@ model-generated commands.
 > doc covers the architecture and lifecycle.
 
 ---
+
+## DeepSeek Harness and MiMo Code
+
+Install the official CLI on the computer that runs the daemon. These are separate
+engines (`deepseek` and `mimo`), not model aliases for Claude or OpenCode.
+
+```powershell
+npm install -g @deepseek-ai/dsh
+npm install -g @mimo-ai/cli
+mimo auth login
+```
+
+DeepSeek Harness uses `dsh --profile headless --json`.
+
+The verified CLI version is **0.2.2-rc.1**. Version **0.1.0-rc.7** does not
+accept `--json` and must be upgraded before use. After upgrading, verify
+`dsh --profile headless --help` lists JSON output, session IDs and permission
+options. On npm versions with install-script approval, permit the packages
+reported by that one install explicitly; do not globally disable script policy.
+The CLI upgrade does not supply provider credentials: configure
+`DEEPSEEK_API_KEY` or the credentials used by the selected headless profile.
+
+Its shipped headless profile reads `DEEPSEEK_API_KEY` from the daemon environment or its normal `.env`
+sources; it does not reuse the GUI's saved sign-in. Keep credentials on the paired
+computer. Leave model fields blank to follow the local profile, or enter a
+configured `provider/model` route (for example `deepseek-official/deepseek-flash`).
+Pins are applied as temporary overlays, including on resumed sessions; the
+operator's saved profile is preserved. The adapter was checked with dsh
+`0.2.2-rc.1`; this vendor interface is still a developer preview.
+
+MiMo Code uses `mimo run --format json`, its own `MIMOCODE_CONFIG_CONTENT`,
+`.mimocode/skills`, `mimo models` listing, and provider/model pins. Each wake
+resumes the session reported by that engine. Cumora records independent
+`byoa-deepseek` and `byoa-mimo` sources. Missing model or usage information stays
+unknown rather than being attributed to Claude or OpenCode.
+
+Both adapters require the existing explicit compatibility opt-in
+`CUMORA_BYOA_ALLOW_UNSANDBOXED=1`. Main turns allow local tools; classification
+and doctor calls block tool execution. Review the compatibility-mode boundary
+below before opting in. In a source checkout, use the modified daemon rather
+than an older published npm package:
+
+```powershell
+$env:CUMORA_BYOA_ALLOW_UNSANDBOXED = '1'
+# Replace CODE with the code shown by Cumora; choose deepseek or mimo.
+node --import tsx server/src/cli-bin.ts agent computer --pair CODE --engine deepseek
+```
 
 ## Codex login and state isolation
 
@@ -150,6 +197,8 @@ Discovery covers backend vendors through the engine that uses them:
 | ZCode | Enabled providers in `v2/config.json` and desktop `v2/provider_config.json`; `ZCODE_HOME` and `ZCODE_PROVIDER` are honored |
 | Maka | The current ACP adapter does not expose model selection |
 | omp | Native `omp models --json` (selector ids) |
+| MiMo Code | Native `mimo models` (provider/model ids) |
+| DeepSeek Harness | Follows the local headless profile; custom pins use its configured `provider/model` route |
 
 Native CLI commands resolve their own provider configuration and are re-read on
 each rescan, with the daemon environment and a neutral working directory.
@@ -823,6 +872,44 @@ npx cumora@latest agent computer --pair <code> [--server <url>]
 
 ---
 
+## Project working directories
+
+For an isolated Windows/LAN trial of the current source build, see
+[LOCAL_PC_TRIAL.md](LOCAL_PC_TRIAL.md). The published `npx cumora@latest`
+service does not include unshipped workspace changes. Native Windows Codex
+inference probes do not prove filesystem execution: the strict profile can be
+rejected by the installed Windows sandbox; the local trial guide uses verified
+WSL tooling without broadening host access.
+
+In **Me → Projects → Local working directory**, select a paired computer and
+bind an existing absolute directory. Desktop and Android use the same setting.
+The selected computer checks that the directory exists, is readable and writable,
+and whether it is a Git repository. The UI shows pending, ready, unavailable, or
+offline status; the server never interprets the path as its own filesystem.
+
+Project-conversation inbox tasks and manual briefs run in that project's directory
+on the assigned computer. Mixed-project messages are processed in separate turns;
+messages from other projects remain unread until their turn. A missing directory
+or a binding available only on another computer fails explicitly instead of falling
+back to the agent home. Keep the server and computer daemon updated together:
+this feature requires database migration **0015** and a daemon advertising project
+directory support. Older daemon tokens cannot run agents belonging to bound projects.
+
+The agent's persona, private memory, runtime bridge and session pointers remain in
+its separate home. Sessions are isolated by directory and binding generation. The
+daemon reads the existing repository `AGENTS.md`; it does not initialize Git,
+overwrite instructions, move files, or discard dirty changes. Agents in the same
+daemon serialize turns against the same physical directory. This is not a lock
+across independent daemons or computers; use separate clones on different computers.
+Global agenda turns without a project identity use the agent home.
+
+PostgreSQL stores only the computer/path binding and validation status, not the
+repository or `.git` contents. Repository files and generated code stay in the
+bound directory. Application collaboration documents and uploaded attachments
+retain their existing server storage; automatic Markdown export and attachment
+mirroring into this directory are not implemented. Changing or removing a binding
+does not delete local files or move an already running process into a new directory.
+
 ## Boundaries
 
 - **Cost / rate limits are the operator's** (their Claude Code / Codex / Grok Build /
@@ -837,7 +924,7 @@ npx cumora@latest agent computer --pair <code> [--server <url>]
   in daemon memory and never enters the engine environment or agent home;
   short TTL and computer revocation remain defense in depth.
 - **Secure-default engine tools are OS-sandboxed.** They can modify the agent
-  home and invoke only the fixed Cumora MCP tool, but cannot rewrite its bridge,
+  home and a selected project directory and invoke only the fixed Cumora MCP tool, but cannot rewrite its bridge,
   read the rest of the host, inherit daemon/provider secrets, or open
   command-network connections. Persona and standing-prompt refreshes are
   atomic and refuse linked state directories. Runner replacement waits for the

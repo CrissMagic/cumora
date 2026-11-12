@@ -8,6 +8,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <application
-        android:networkSecurityConfig="@xml/network_security_config"
+        android:networkSecurityConfig="@xml/cumora_debug_network_security_config"
         tools:replace="android:networkSecurityConfig" />
 </manifest>

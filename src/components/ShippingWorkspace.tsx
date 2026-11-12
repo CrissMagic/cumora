@@ -89,13 +89,14 @@ export function ShippingWorkspace({ compact = false }: { compact?: boolean }) {
     <div className={cn('ship-workspace h-full min-h-0 bg-[var(--ship-canvas)]', compact ? 'relative overflow-hidden' : 'grid grid-cols-[300px_minmax(0,1fr)]')}>
       {showList && (
         <aside className={cn('h-full overflow-y-auto border-r border-ink-100 bg-cloud', compact && 'absolute inset-0 border-r-0')}>
-          <div className="sticky top-0 z-10 border-b border-ink-100 bg-cloud/95 px-4 py-4 backdrop-blur">
-            <div className="flex items-center justify-between">
+          <div className={cn('sticky top-0 z-10 border-b border-ink-100', compact ? 'bg-paper px-5 pb-4' : 'bg-cloud/95 px-4 py-4 backdrop-blur')}
+            style={compact ? { paddingTop: 'max(env(safe-area-inset-top), 12px)' } : undefined}>
+            <div className={cn("flex items-center justify-between", compact && "min-h-16 pt-3 gap-3")}>
               <div>
-                <h1 className="text-[18px] font-semibold text-ink-900">{t('nav.ship')}</h1>
-                <p className="mt-0.5 text-[11px] text-ink-400">{t('ship.subtitle')}</p>
+                <h1 className={cn("font-semibold text-ink-900", compact ? "text-[24px] leading-8 tracking-tight" : "text-[18px]")}>{t('nav.ship')}</h1>
+                <p className={cn("mt-1 text-ink-500", compact ? "text-[13px] leading-5" : "text-[11px]")}>{t('ship.subtitle')}</p>
               </div>
-              <button type="button" onClick={() => setCreating(true)} className="grid h-9 w-9 place-items-center rounded-xl bg-skype text-white shadow-soft" aria-label={t('ship.newFeature')} title={t('ship.newFeatureTitle')}><IPlus className="h-4 w-4" /></button>
+              <button type="button" onClick={() => setCreating(true)} className={compact ? "mobile-primary-icon-button" : "grid h-9 w-9 place-items-center rounded-xl bg-skype text-white shadow-soft"} aria-label={t('ship.newFeature')} title={t('ship.newFeatureTitle')}><IPlus className="h-4 w-4" /></button>
             </div>
           </div>
           {creating && <CreateFeature onClose={() => setCreating(false)} />}
