@@ -85,7 +85,9 @@ openssl rand -hex 32
 
 当前服务启动必填 `OPENAI_API_KEY`，辅助推理、图像/头像或嵌入等功能可能调用服务端模型。不要复制局域网试用的占位 key 并宣称功能正常。默认模型见 `server/src/env.ts`；若账号无对应模型权限，按实际能力填写 `OPENAI_MODEL`、`OPENAI_MODEL_SUPPORT` 并单独验证。此部署并未实现“完全无服务端模型凭据”的模式。本机智能体的模型登录和凭据另外保存在本机。
 
-Compose 根据域名生成公共地址、CORS 和登录回跳配置；同源网页无需另设 API 地址。Android 的 `https://localhost` / `capacitor://localhost` 已在允许列表中，不使用通配符。
+Compose 根据域名生成公共地址、CORS 和登录回跳配置；同源网页无需另设 API 地址。Android 的 `https://localhost` / `capacitor://localhost`、PC Electron 的 `app://cumora` 已在允许列表中，不使用通配符。PC 登录使用本机回环地址 `http://127.0.0.1:47823/auth/done`（附带一次性 nonce），也必须在回跳允许列表中；该地址指用户电脑，不是在云端开放 47823 端口。
+
+如果正在使用较早的配置，补上以上桌面来源和回跳地址，然后重新创建 app 容器使环境生效：`dc up -d --no-deps --force-recreate app`。仅 `restart` 不会载入新的容器环境变量。
 
 ## 3. 配置固定登录入口
 

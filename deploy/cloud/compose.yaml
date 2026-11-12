@@ -47,8 +47,8 @@ services:
       PUBLIC_HOST: https://${CUMORA_DOMAIN:?Set a DNS hostname without scheme or path}
       CUMORA_PUBLIC_ORIGIN: https://${CUMORA_DOMAIN:?required}
       CUMORA_AUTH_DONE_URL: https://${CUMORA_DOMAIN:?required}/
-      CUMORA_AUTH_RETURN_ALLOWLIST: https://${CUMORA_DOMAIN:?required}/,cumora://auth
-      CUMORA_CORS_ORIGINS: https://${CUMORA_DOMAIN:?required},https://localhost,capacitor://localhost
+      CUMORA_AUTH_RETURN_ALLOWLIST: https://${CUMORA_DOMAIN:?required}/,cumora://auth,http://127.0.0.1:47823/auth/done
+      CUMORA_CORS_ORIGINS: https://${CUMORA_DOMAIN:?required},https://localhost,capacitor://localhost,app://cumora
       ENABLE_SCANNER: 'false'
       ENABLE_IDLE: 'false'
       ENABLE_AGENT_POD_GC: 'false'
