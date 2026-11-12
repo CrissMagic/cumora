@@ -22,7 +22,7 @@ Cumora is cross-platform team chat where AI agents are first-class participants 
 Two "brain" paths:
 
 - **Cumora Cloud** — each agent runs in a managed per-agent pod; turns run a multi-hop tool-calling loop on the OpenAI Responses API (bash, files, browser, email, memory, skills…).
-- **BYOA (Bring Your Own Agent)** — pair your own Mac/VPS with `npx cumora agent computer` and run the agent on your local provider account (Claude Code, Codex, Grok Build, Cursor Agent, OpenCode, pi, Gemini CLI, Qwen Code, Antigravity, or ZCode). Claude Code and Codex use fail-closed filesystem, command-network, and subprocess-credential boundaries by default; the other engines require an explicit unsandboxed compatibility opt-in. The server never sees your provider keys. See [`docs/BYOA.md`](docs/BYOA.md).
+- **BYOA (Bring Your Own Agent)** — pair your own Mac/VPS with `npx cumora agent computer` and run the agent on your local provider account (Claude Code, Codex, Grok Build, Cursor Agent, OpenCode, pi, Gemini CLI, Qwen Code, Antigravity, ZCode, DeepSeek Harness, or MiMo Code). Claude Code and Codex use fail-closed filesystem, command-network, and subprocess-credential boundaries by default; the other engines require an explicit unsandboxed compatibility opt-in. The server never sees your provider keys. See [`docs/BYOA.md`](docs/BYOA.md).
 
 ## Architecture
 
@@ -45,6 +45,14 @@ Two "brain" paths:
 - **Coordination**: agents in the same room don't trample each other. The server arbitrates with a seen-cursor freshness gate (a stale reply is HELD and shown the newer messages to re-decide), atomic claims on real units of work, and a small-brain triage gate that shields the big model. Design notes in [`docs/COORDINATION.md`](docs/COORDINATION.md).
 
 ## Run locally
+
+For a single Linux cloud server with HTTPS, PostgreSQL, Redis, and computers
+connecting from home, follow [`docs/CLOUD_DEPLOYMENT.md`](docs/CLOUD_DEPLOYMENT.md).
+The checked-in Compose configuration is under [`deploy/cloud/`](deploy/cloud/).
+
+For a Windows PC service plus a real Android phone on the same LAN, follow
+[`docs/LOCAL_PC_TRIAL.md`](docs/LOCAL_PC_TRIAL.md). It runs this checkout's backend
+and daemon in isolated local services and packages the phone's backend address.
 
 You need Postgres and Redis (Homebrew services are fine):
 
@@ -116,6 +124,8 @@ INTEGRATION_DATABASE_URL=postgres://$USER@localhost:5432/cumora_test \
 - [`docs/SHIPPING.md`](docs/SHIPPING.md) — the evidence-backed feature lifecycle shared by humans and agents.
 - [`docs/RELEASE.md`](docs/RELEASE.md) — desktop and backend release operations.
 - [`docs/MOBILE_IOS.md`](docs/MOBILE_IOS.md) / [`docs/PUSH_NOTIFICATIONS.md`](docs/PUSH_NOTIFICATIONS.md) — iOS build and push setup.
+- [`docs/MOBILE_ANDROID.md`](docs/MOBILE_ANDROID.md) — Android environment, debug APK build and device verification.
+- [`docs/LOCAL_PC_TRIAL.md`](docs/LOCAL_PC_TRIAL.md) — Windows local services, isolated WSL execution, LAN access, login and phone trial.
 
 ## Contributing & security
 

@@ -22,6 +22,10 @@
 # Don't bake source maps / built assets / huge logs into the layer.
 server/**/*.log
 server/**/dist
+# Never send runtime uploads or private environment files to the builder.
+server/uploads
+**/.env
+**/.env.*
 # Local frontend build outputs — we always rebuild inside the image.
 dist
 node_modules

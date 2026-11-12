@@ -1,0 +1,6 @@
+{$CUMORA_DOMAIN} {
+	reverse_proxy app:5181 {
+		# Flush SSE events immediately; WebSocket upgrades are automatic.
+		flush_interval -1
+	}
+}

@@ -42,6 +42,8 @@ ios/App/App.xcodeproj/xcuserdata
 ios/App/App.xcodeproj/project.xcworkspace/xcuserdata
 ios/App/.symlinks
 .cap-tmp/
+.local/
+/backups/
 
 # TestFlight archive / IPA outputs from `xcodebuild archive`
 /build/Cumora.xcarchive

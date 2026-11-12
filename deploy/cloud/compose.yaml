@@ -1,0 +1,94 @@
+name: cumora-cloud
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cumora
+      POSTGRES_USER: cumora
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/cloud/.env}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cumora -d cumora']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  app:
+    image: cumora-cloud:${CUMORA_IMAGE_TAG:-local}
+    build:
+      context: ../..
+      dockerfile: server/docker/cumora-server.Dockerfile
+      args:
+        VITE_CUMORA_API_BASE: ''
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: '5181'
+      DATABASE_URL: postgres://cumora:${POSTGRES_PASSWORD:?required}@postgres:5432/cumora
+      REDIS_URL: redis://redis:6379
+      AGENT_RUNTIME_SECRET: ${AGENT_RUNTIME_SECRET:?Set a random runtime secret}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set a valid server-side API key}
+      PUBLIC_HOST: https://${CUMORA_DOMAIN:?Set a DNS hostname without scheme or path}
+      CUMORA_PUBLIC_ORIGIN: https://${CUMORA_DOMAIN:?required}
+      CUMORA_AUTH_DONE_URL: https://${CUMORA_DOMAIN:?required}/
+      CUMORA_AUTH_RETURN_ALLOWLIST: https://${CUMORA_DOMAIN:?required}/,cumora://auth
+      CUMORA_CORS_ORIGINS: https://${CUMORA_DOMAIN:?required},https://localhost,capacitor://localhost
+      ENABLE_SCANNER: 'false'
+      ENABLE_IDLE: 'false'
+      ENABLE_AGENT_POD_GC: 'false'
+      ENABLE_CHROME_PVC_GC: 'false'
+      ENABLE_CLUSTER_MONITOR: 'false'
+    ports:
+      - '127.0.0.1:5181:5181'
+    volumes:
+      - uploads:/app/server/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:5181/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      CUMORA_DOMAIN: ${CUMORA_DOMAIN:?required}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro,Z
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  postgres:
+  redis:
+  uploads:
+  caddy_data:
+  caddy_config:
