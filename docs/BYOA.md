@@ -595,6 +595,47 @@ fail-closed host boundary:
   sandbox because the unelevated restricted-token implementation cannot enforce
   this split filesystem profile. Codex 0.138.0 or newer is required.
 
+### Native Windows Codex: compatibility reading
+
+Some native Windows elevated sandboxes reject the minimal-read profile with
+`elevated Windows sandbox requires effective :root read access` before any
+command starts. Desktop/Android client updates do not update the separate BYOA
+daemon or change this permission requirement.
+
+On a trusted personal PC, the operator can explicitly enable
+`CUMORA_CODEX_WINDOWS_READ_COMPAT=1` in the daemon process environment, then
+restart the daemon. This uses a root-readable baseline **on native Windows
+only**: commands can read files accessible to the sandbox account outside the
+project, including credential files if filesystem permissions permit it.
+Writes remain limited to the working project and separate agent home; read-only
+classification/probe calls remain read-only, command networking remains
+disabled, and the tool environment stays filtered. This is separate from the
+full unsandboxed opt-in and the dsh compatibility setting.
+
+For a source-installed Windows supervisor, add this line before the daemon
+launch in `%USERPROFILE%\.cumora\daemon-supervisor.ps1`:
+
+```powershell
+$env:CUMORA_CODEX_WINDOWS_READ_COMPAT = '1'
+```
+
+The built-in Windows service installer carries the flag when it is explicitly
+set in its process environment. Existing supervisors must be updated explicitly.
+Remove the line and restart the daemon to return to the strict minimal-read
+profile; on affected Windows hosts, local command startup will fail again.
+Keep the flag unset on Linux/macOS/WSL. Use WSL when strict read isolation is
+required and the native sandbox cannot enforce it. See the
+[official Windows sandbox documentation](https://learn.chatgpt.com/docs/windows/windows-sandbox).
+
+The real Windows regression test uses only synthetic files and a loopback
+listener, without model or cloud requests. Set `CUMORA_TEST_CODEX_BIN` to a native
+Codex executable and `CUMORA_TEST_CODEX_HOME` to an already provisioned sandbox
+home, then run:
+
+```powershell
+node --import tsx --test server/src/__tests__/agents-computer-codex-windows-sandbox.test.ts
+```
+
 Grok, Cursor, OpenCode, pi, Gemini, Qwen, Antigravity, ZCode, and Claude on native Windows remain
 available only as a backwards-compatibility escape hatch. They are not merely
 hidden in the UI: the daemon removes them from its runnable inventory, so a

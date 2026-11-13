@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { promisify } from 'node:util'
 import {
   isWindowsSupervisorProcess,
   parseWindowsProcessList,
@@ -13,6 +18,29 @@ import {
   windowsScheduledTaskSettingsCommand,
   windowsTaskName,
 } from '../agents/computer/daemon.js'
+
+test('Windows watchdog carries the chosen Codex read compatibility into the daemon process',
+  { skip: process.platform !== 'win32', timeout: 30_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cumora-supervisor-read-'))
+    try {
+      const stub = join(root, 'stub.cmd')
+      const child = join(root, 'capture.cjs')
+      const disabled = join(root, 'disabled')
+      const captured = join(root, 'capture.json')
+      await writeFile(child, `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(captured)},JSON.stringify({compat:process.env.CUMORA_CODEX_WINDOWS_READ_COMPAT??null}));fs.writeFileSync(${JSON.stringify(disabled)},'stop');`)
+      await writeFile(stub, `@echo off\r\n"${process.execPath}" "${child}"\r\n`)
+      for (const enabled of [false, true]) {
+        await rm(disabled, { force: true })
+        const script = join(root, 'supervisor.ps1')
+        await writeFile(script, renderWindowsSupervisor(stub, 'https://fixture.invalid', join(root, 'daemon.log'), disabled,
+          process.env.PATH ?? '', false, [], enabled))
+        await promisify(execFile)(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-File', script], {
+          env: { ...process.env, CUMORA_CODEX_WINDOWS_READ_COMPAT: undefined }, windowsHide: true, timeout: 12_000,
+        })
+        assert.deepEqual(JSON.parse(await readFile(captured, 'utf8')), { compat: enabled ? '1' : null })
+      }
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
 
 test('Windows service resolves the executable command shim', () => {
   assert.equal(resolveNpx('win32', 'Z:\\missing\\node.exe'), 'npx.cmd')

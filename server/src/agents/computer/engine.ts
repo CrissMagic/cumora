@@ -2055,10 +2055,14 @@ export function codexWebSearchMode(env: NodeJS.ProcessEnv): 'disabled' | 'cached
 }
 
 /** Shared sandbox profile for exec, persistent sessions and wake probes. */
-function codexSecureConfigOverrides(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
+export function codexSecureConfigOverrides(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
   const workspaceAccess = readOnly ? 'read' : 'write'
   const filesystemEntries = [
-    '":minimal"="read"',
+    // Legacy native Windows requires a root-readable baseline. This broadens
+    // reads and must be a local operator opt-in; it does not relax writes,
+    // command networking, tool environment filtering or other platforms.
+    IS_WIN && args.env.CUMORA_CODEX_WINDOWS_READ_COMPAT === '1'
+      ? '":root"="read"' : '":minimal"="read"',
     `":workspace_roots"={"."="${workspaceAccess}"}`,
     ...(!readOnly && args.env.CUMORA_AGENT_HOME && args.env.CUMORA_AGENT_HOME !== args.home
       ? [`${tomlString(args.env.CUMORA_AGENT_HOME)}="write"`] : []),

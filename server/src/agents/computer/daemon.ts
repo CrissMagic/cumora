@@ -3917,6 +3917,9 @@ async function doRun(serverOverride?: string): Promise<void> {
   }
   const compatibility = compatibilityEngineIds()
   if (compatibility.length) console.warn(`[computer] local compatibility engines: ${compatibility.join(', ')} — host files and network enabled for these adapters only`)
+  if (process.platform === 'win32' && process.env.CUMORA_CODEX_WINDOWS_READ_COMPAT === '1' && !allowUnsandboxedByoa()) {
+    console.warn('[computer] Codex Windows compatibility reads enabled: host reads follow sandbox-account access; project/agent writes and command network restrictions remain active')
+  }
   // Global safety net: a long-running daemon hosting every one of the user's
   // agents must NOT die because one async path threw — a transient 502 from a
   // server pod rolling, a network blip, a malformed event. Node ≥15 turns an
@@ -4455,10 +4458,12 @@ export function renderWindowsSupervisor(
   // every start, and this loop restarts it every 5 seconds forever.
   carryUnsandboxed = false,
   compatibilityEngines = compatibilityEngineIds(),
+  windowsCodexReadCompat = process.env.CUMORA_CODEX_WINDOWS_READ_COMPAT === '1',
 ): string {
   return [
     "$ErrorActionPreference = 'Continue'",
     "$env:CUMORA_SUPERVISED = '1'",
+    ...(windowsCodexReadCompat ? ["$env:CUMORA_CODEX_WINDOWS_READ_COMPAT = '1'"] : []),
     ...(carryUnsandboxed ? ["$env:CUMORA_BYOA_ALLOW_UNSANDBOXED = '1'"] : []),
     ...(compatibilityEngines.length ? [`$env:CUMORA_BYOA_COMPAT_ENGINES = ${quotePowerShell(compatibilityEngines.join(','))}`] : []),
     `$env:PATH = ${quotePowerShell(path)}`,
