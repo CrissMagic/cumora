@@ -43,7 +43,7 @@ interface AuthState {
   setSession: (token: string, user: AuthUser, companyId: string | null) => void
   setMe: (user: AuthUser, companies: AuthCompany[], activeCompanyId: string | null) => void
   setServerCapabilities: (caps: ServerCapabilities) => void
-  setActiveCompany: (id: string) => void
+  setActiveCompany: (id: string) => Promise<void>
   addCompany: (c: AuthCompany) => void
   removeCompany: (id: string, nextCompanyId: string | null) => boolean
   clear: () => void
@@ -53,8 +53,8 @@ interface AuthState {
 const TOKEN_KEY = 'cumora.auth.token'
 const COMPANY_KEY = 'cumora.auth.company'
 
-function resetWorkspaceStores(): void {
-  void Promise.all([
+async function resetWorkspaceStores(): Promise<void> {
+  await Promise.all([
     import('./documents').then(({ useDocuments }) => useDocuments.getState().reset()),
     import('./boards').then(({ useBoards }) => useBoards.getState().reset()),
     import('./calendar').then(({ useCalendar }) => useCalendar.getState().reset()),
@@ -110,7 +110,7 @@ export const useAuth = create<AuthState>((set) => ({
   setServerCapabilities(caps) {
     set({ serverCapabilities: caps })
   },
-  setActiveCompany(id) {
+  async setActiveCompany(id) {
     if (useAuth.getState().activeCompanyId === id) return
     usePairingCodes.getState().clear()
     localStorage.setItem(COMPANY_KEY, id)
@@ -125,7 +125,7 @@ export const useAuth = create<AuthState>((set) => ({
     // next listXXX() lands. These stores are global singletons that
     // outlive the AuthedApp remount, so a key-change alone doesn't
     // clear them.
-    resetWorkspaceStores()
+    await resetWorkspaceStores()
   },
   /** Append a freshly-created company to the user's set and switch to it. */
   addCompany(c) {

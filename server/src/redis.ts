@@ -79,6 +79,15 @@ interface TenantTagged {
   deliveryId?: string
 }
 
+export interface MessageNotificationEvent extends TenantTagged {
+  type: 'message.notification'
+  conversationId: string
+  conversationTitle: string
+  authorName: string
+  recipientUserIds: string[]
+  message: { id: string; authorId: string; kind: string; body: string }
+}
+
 export interface MessageNewEvent extends TenantTagged {
   type: 'message.new'
   conversationId: string
@@ -436,7 +445,7 @@ export interface PollUpdatedEvent extends TenantTagged {
   actorId: string | null
 }
 
-export type BroadcastEvent = MessageNewEvent | MessageDeltaEvent | TypingEvent
+export type BroadcastEvent = MessageNotificationEvent | MessageNewEvent | MessageDeltaEvent | TypingEvent
   | StatusEvent | AvatarEvent | ParticipantAddedEvent | ParticipantRosterChangedEvent | ReactionsEvent
   | GroupPulledEvent | ConversationUpdatedEvent | ConveneEvent
   | BoardEvent | DocIndexEvent | DocUpdateEvent | DocAwarenessEvent | DocMentionEvent | CalendarReminderEvent

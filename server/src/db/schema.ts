@@ -8,6 +8,8 @@ export const conversations = pgTable('conversations', {
   title: text('title').notNull(),
   subtitle: text('subtitle'),
   members: jsonb('members').$type<string[]>().notNull(),
+  agentsPaused: boolean('agents_paused').default(false).notNull(),
+  agentControlRevision: integer('agent_control_revision').default(0).notNull(),
   pinned: boolean('pinned').default(false).notNull(),
   tag: text('tag'),
   pulledBy: jsonb('pulled_by').$type<{ agentId: string; at: string; reason: string } | null>(),

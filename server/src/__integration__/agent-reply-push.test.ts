@@ -30,6 +30,7 @@ import { runCli } from '../agents/cli.js'
 import { startPrivateChat } from '../agents/private_chat.js'
 import { startPulledGroup } from '../agents/scanner_helper.js'
 import { __setNotifyHookForTesting } from '../push.js'
+import { recordWorkspaceView, removeWorkspaceView } from '../workspace-presence.js'
 
 interface Captured {
   authorId: string
@@ -120,6 +121,7 @@ test('[integration] a human already looking at the app is still skipped', async 
   const humanId = 'u-online'
   await seedOfflineHuman(companyId, humanId)
   await pool.query(`UPDATE participants SET status = 'avail' WHERE id = $1`, [humanId])
+  await recordWorkspaceView(humanId, companyId, 'push-test-foreground')
   await seedRoom(companyId, 'c-launch', [agentId, humanId])
 
   await runCli(['--as', agentId, 'reply', 'c-launch', 'hello'])
@@ -127,6 +129,7 @@ test('[integration] a human already looking at the app is still skipped', async 
 
   const withRecipients = sent.filter((s) => s.recipientUserIds.length > 0)
   assert.equal(withRecipients.length, 0, 'pushed to someone who is on the app')
+  await removeWorkspaceView(humanId, companyId, 'push-test-foreground')
 })
 
 test('[integration] a muted conversation is still muted', async () => {

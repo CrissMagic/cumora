@@ -8,9 +8,11 @@ type Runner = {
   lastInboxDrainAt: number
   token: string
   busy: boolean
-  pendingBackgroundBrief: { title: string; body: string } | null
+  projectBriefQueue: Array<{ conversationId: string | null; brief: { title: string; body: string }; controlRevision: number }>
+  queueBackgroundBrief(brief: { title: string; body: string }, conversationId: string | null): void
   snapshotUnread(token: string): Promise<unknown>
   runTurn(reason: string): Promise<void>
+  refreshConversationControls(): Promise<void>
   ensureToken(): Promise<string>
   postStatus(token: string, status: 'avail' | 'thinking'): Promise<void>
   maybeAgendaTurn(token: string): Promise<void>
@@ -62,8 +64,9 @@ test('a failed inbox ends the turn and preserves the manual wake for retry', asy
   runner.lastInboxDrainAt = NOW - 10_000
   runner.token = 'fixture-token'
   const brief = { title: 'Review assigned card', body: 'Review the assigned change' }
-  runner.pendingBackgroundBrief = brief
+  runner.queueBackgroundBrief(brief, 'fixture-room')
   t.mock.method(runner, 'ensureToken', async () => runner.token)
+  t.mock.method(runner, 'refreshConversationControls', async () => {})
   const status = t.mock.method(runner, 'postStatus', async () => { throw new Error('unexpected status update') })
   const agenda = t.mock.method(runner, 'maybeAgendaTurn', async () => {})
   const error = t.mock.method(console, 'error', () => {})
@@ -71,7 +74,7 @@ test('a failed inbox ends the turn and preserves the manual wake for retry', asy
   await runner.runTurn('sse-wake')
   assert.equal(runner.busy, false)
   assert.equal(runner.lastInboxDrainAt, 0)
-  assert.deepEqual(runner.pendingBackgroundBrief, brief)
+  assert.deepEqual(runner.projectBriefQueue, [{ conversationId: 'fixture-room', brief, controlRevision: 0 }])
   assert.equal(status.mock.callCount(), 0)
   assert.equal(agenda.mock.callCount(), 0)
   assert.match(String(error.mock.calls[0]?.arguments[1]), /inbox fetch failed/)

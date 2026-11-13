@@ -151,7 +151,7 @@ export function NotificationWindow() {
 
   const dismiss = (id: string) => setToasts((prev) => prev.filter((t) => t.id !== id))
   const onClick = (t: Toast) => {
-    window.cumora?.notify?.focusConvo(t.conversationId)
+    window.cumora?.notify?.focusConvo(t.conversationId, t.companyId)
     dismiss(t.id)
   }
 

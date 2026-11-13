@@ -52,7 +52,7 @@ contextBridge.exposeInMainWorld('cumora', {
   notify: {
     push: (payload) => ipcRenderer.send('notification:push', payload),
     dismiss: (id) => ipcRenderer.send('notification:dismiss', id),
-    focusConvo: (conversationId) => ipcRenderer.send('notification:focus-convo', conversationId),
+    focusConvo: (conversationId, companyId) => ipcRenderer.send('notification:focus-convo', conversationId, companyId),
     /** Notification renderer → main: I have mounted, flush queued pushes. */
     ready: () => ipcRenderer.send('notification:ready'),
     /** Notification renderer → main: first toast has painted, show me. */
@@ -75,7 +75,7 @@ contextBridge.exposeInMainWorld('cumora', {
     },
     /** Subscribed from the MAIN window — fires when notification window asks to focus a conversation. */
     onFocusConvo: (handler) => {
-      const wrapped = (_evt, conversationId) => handler(conversationId)
+      const wrapped = (_evt, conversationId, companyId) => handler(conversationId, companyId)
       ipcRenderer.on('notification:focus-convo', wrapped)
       return () => ipcRenderer.removeListener('notification:focus-convo', wrapped)
     },

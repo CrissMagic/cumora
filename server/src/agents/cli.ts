@@ -9,6 +9,7 @@
  * for structured output if the agent wants to parse fields.
  */
 
+import { conversationReplyRevisions } from './conversation-control.js'
 import { pool } from '../db/pool.js'
 import type { PoolClient } from 'pg'
 import { storage, freshenMessageAttachments, type StoredAttachment } from '../storage.js'
@@ -1100,7 +1101,7 @@ async function loadInbox(agentId: string): Promise<InboxItem[]> {
         AND requesting_agent.kind = 'agent'
         AND requesting_agent.departed_at IS NULL
        LEFT JOIN participants p ON p.id = m.author_id AND p.company_id = c.company_id
-      WHERE (EXISTS (
+      WHERE NOT c.agents_paused AND (EXISTS (
                SELECT 1 FROM conversation_members member
                 WHERE member.conversation_id = c.id
                   AND member.participant_id = $1
@@ -2334,7 +2335,7 @@ async function cmdReply(parsed: ParsedArgs): Promise<CliResult> {
   try {
     await txClient.query('BEGIN')
     const activeActor = await txClient.query(
-      `SELECT id FROM participants
+      `SELECT id, kind FROM participants
         WHERE id = $1 AND company_id = $2
           AND kind IN ('agent', 'human') AND departed_at IS NULL
         FOR SHARE`,
@@ -2342,9 +2343,9 @@ async function cmdReply(parsed: ParsedArgs): Promise<CliResult> {
     )
     const lockedConversation = activeActor.rowCount
       ? await txClient.query(
-        `SELECT c.id FROM conversations c
+        `SELECT c.id, c.agents_paused, c.agent_control_revision FROM conversations c
           WHERE c.id = $1 AND c.company_id = $2
-          FOR SHARE OF c`,
+          FOR UPDATE OF c`,
         [convoId, companyId],
       )
       : null
@@ -2360,6 +2361,15 @@ async function cmdReply(parsed: ParsedArgs): Promise<CliResult> {
     if (!authorizedRows[0]) {
       await txClient.query('ROLLBACK')
       return err(`conversation ${convoId} no longer authorized; reply cancelled`)
+    }
+    const control = lockedConversation?.rows[0]
+    const revisions = conversationReplyRevisions.getStore()
+    // This row lock serializes with human pause/resume. A reply committed
+    // before pause remains history; none can commit after pause has won.
+    if (activeActor.rows[0]?.kind === 'agent' && (control?.agents_paused || (revisions && control
+      && (revisions[convoId] ?? 0) !== control.agent_control_revision))) {
+      await txClient.query('ROLLBACK')
+      return err('PAUSED — this conversation was paused or this turn is obsolete; wait for a new turn after manual resume')
     }
     const { rows: seqRow } = await txClient.query<{ seq: number }>(
       `INSERT INTO conversation_counters (conversation_id, next_sequence)

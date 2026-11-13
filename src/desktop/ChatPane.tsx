@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ConversationAgentControl } from '@/components/ConversationAgentControl'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useApp } from '@/stores/app'
 import { EMPTY_DRAFT, type ComposerDraft } from '@/stores/composerDrafts'
 import { useMe } from '@/stores/auth'
 import { isMuted, useConversations } from '@/stores/conversations'
 import { useParticipants } from '@/stores/participants'
-import { useMessages, sendUserMessage, messagesFor, VIRTUOSO_FIRST_INDEX_BASE } from '@/stores/messages'
-import type { MessagesState } from '@/stores/messages'
+import { useMessages, sendUserMessage, createMessagesSelector, VIRTUOSO_FIRST_INDEX_BASE } from '@/stores/messages'
 import { api } from '@/api/client'
 import { Avatar, AvatarStack } from '@/components/Avatar'
 import { MembersPopover } from '@/components/MembersPopover'
@@ -102,18 +102,13 @@ function ComingSoonPop({ onClose }: { onClose: () => void }) {
 }
 
 function ChatHeader({
-  convoId, onConvene, onToggleSearch, searchOpen,
+  convoId, onToggleSearch, searchOpen,
 }: {
   convoId: string
-  // Kept wired so the underlying Convene flow can be re-enabled by
-  // flipping the button's onClick back; for now the button shows a
-  // ComingSoonPop instead.
-  onConvene: () => void
   onToggleSearch: () => void
   searchOpen: boolean
 }) {
   const t = useT()
-  void onConvene
   const c = useConversations((s) => s.list.find((x) => x.id === convoId))
   const byId = useParticipants((s) => s.byId)
   const [editingTopic, setEditingTopic] = useState(false)
@@ -1722,10 +1717,9 @@ function EmptyConversationState() {
 export function ChatPane() {
   const t = useT()
   const convoId = useApp((s) => s.selectedConversationId)
-  const setView = useApp((s) => s.setView)
   // Atomic selectors — primitive / stable refs
-  const byConvo = useMessages((s) => (convoId ? s.byConvo[convoId] : undefined))
-  const streaming = useMessages((s) => s.streaming)
+  const selectMessages = useMemo(() => createMessagesSelector(convoId), [convoId])
+  const list = useMessages(selectMessages)
   const typingIds = useMessages((s) => (convoId ? s.typing[convoId] ?? null : null))
   const isLoading = useMessages((s) => (convoId ? s.loading.has(convoId) : false))
   // ThreadLoader visibility — the textbook loader-flicker pattern, with
@@ -1784,11 +1778,6 @@ export function ChatPane() {
   }, [])
   const loadError = useMessages((s) => (convoId ? s.errors[convoId] ?? null : null))
   const retryLoad = useMessages((s) => s.retryLoad)
-  // Compose with memo so the rendered array ref stays stable when inputs do
-  const list = useMemo(
-    () => messagesFor({ byConvo: byConvo ? { [convoId!]: byConvo } : {}, streaming } as MessagesState, convoId),
-    [byConvo, streaming, convoId],
-  )
   const conversations = useConversations((s) => s.list)
   const c = useMemo(() => conversations.find((x) => x.id === convoId), [conversations, convoId])
   const byId = useParticipants((s) => s.byId)
@@ -1953,13 +1942,6 @@ export function ChatPane() {
     return <EmptyConversationState />
   }
 
-  const onConvene = async () => {
-    if (!convoId) return
-    try {
-      await api.startConvene(convoId, c?.title ?? 'live work session')
-      setView('convene')
-    } catch (err) { console.warn('start convene failed', err) }
-  }
 
   return (
     <main
@@ -1979,10 +1961,10 @@ export function ChatPane() {
     >
       <ChatHeader
         convoId={convoId}
-        onConvene={onConvene}
         onToggleSearch={() => setSearchOpen((v) => !v)}
         searchOpen={searchOpen}
       />
+      <ConversationAgentControl key={convoId} conversationId={convoId} />
       {searchOpen && (
         <div className="px-[22px] py-2 border-b border-ink-100 bg-paper/60 backdrop-blur-sm flex items-center gap-2">
           <div className="flex-1 flex items-center gap-2 px-3 py-1.5 bg-cloud border border-ink-100 rounded-[10px] focus-within:border-sky2-300 text-ink-500 text-[13px]">

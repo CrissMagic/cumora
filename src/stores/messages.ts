@@ -641,7 +641,7 @@ export const useMessages = create<MessagesState>((set, get) => ({
   },
 }))
 
-export const messagesFor = (s: MessagesState, convoId: string | null): Message[] => {
+export const messagesFor = (s: Pick<MessagesState, 'byConvo' | 'streaming'>, convoId: string | null): Message[] => {
   if (!convoId) return EMPTY_MESSAGES
   const base = s.byConvo[convoId] ?? EMPTY_MESSAGES
   const streaming = Object.entries(s.streaming)
@@ -656,6 +656,25 @@ export const messagesFor = (s: MessagesState, convoId: string | null): Message[]
     }))
   if (streaming.length === 0) return base
   return [...base, ...streaming]
+}
+
+/** Each mounted thread owns its cache. Unrelated streams must not invalidate
+ * its rendered list or make React subscribe to every conversation's tokens. */
+export function createMessagesSelector(convoId: string | null) {
+  let previousBase: Message[] | undefined
+  let previousStreams: Array<[string, MessagesState['streaming'][string]]> = []
+  let selected = EMPTY_MESSAGES
+  return (state: Pick<MessagesState, 'byConvo' | 'streaming'>): Message[] => {
+    if (!convoId) return EMPTY_MESSAGES
+    const base = state.byConvo[convoId] ?? EMPTY_MESSAGES
+    const streams = Object.entries(state.streaming).filter(([, value]) => value.conversationId === convoId)
+    if (base === previousBase && streams.length === previousStreams.length
+      && streams.every(([id, value], index) => previousStreams[index][0] === id && previousStreams[index][1] === value)) return selected
+    previousBase = base
+    previousStreams = streams
+    selected = messagesFor(state, convoId)
+    return selected
+  }
 }
 
 function newTempId(): string {

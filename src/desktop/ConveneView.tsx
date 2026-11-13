@@ -54,13 +54,6 @@ export function ConveneView() {
     return ids.map((id) => byId[id]).filter(Boolean)
   }, [c?.members, byId])
 
-  const startConvene = async () => {
-    if (!convoId) return
-    try {
-      const session = await api.startConvene(convoId, c?.title ?? t('convene.sessionTitleFallback'))
-      setState({ session, transcript: [] })
-    } catch (err) { console.warn(err) }
-  }
 
   if (!convoId || !c) {
     return (
@@ -84,18 +77,11 @@ export function ConveneView() {
         style={{ background: 'radial-gradient(ellipse 80% 50% at 50% 100%, rgba(143, 211, 247, 0.18), transparent 60%), var(--paper)' }}>
         <div className="text-center max-w-sm">
           <div className="font-display font-medium text-[24px] text-ink-900 mb-2" style={{ letterSpacing: '-0.02em' }}>
-            {state.session ? t('convene.lastWrapped') : t('convene.noLive')}
+            {state.session ? t('convene.lastWrapped') : t('chat.comingSoon')}
           </div>
           <div className="font-display italic text-[14px] text-ink-500 mb-5">
-            {t('convene.ctaSub', { title: c.title })}
+            {t('chat.conveneSoon')}
           </div>
-          <button
-            type="button"
-            onClick={startConvene}
-            className="py-3 px-5 rounded-full text-white text-[13.5px] font-semibold inline-flex items-center gap-2"
-            style={{ background: 'linear-gradient(135deg, var(--skype), var(--skype-deep))', boxShadow: '0 6px 16px -4px rgba(0, 168, 240, 0.5)' }}>
-            {t('convene.startBtn')}
-          </button>
         </div>
       </main>
     )

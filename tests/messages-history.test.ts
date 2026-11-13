@@ -57,8 +57,57 @@ function setup(last: number, cache: Message[] = messages(1, 80)) {
     firstItemIndex: { chat: exports.VIRTUOSO_FIRST_INDEX_BASE },
   })
   const sequences = () => store.getState().byConvo.chat.map((m) => (m as ApiMessage).sequence)
-  return { store, api, requests, sequences }
+  return { store, api, requests, sequences, createMessagesSelector: exports.createMessagesSelector }
 }
+
+describe('conversation rendering during concurrent streams', () => {
+  it('keeps the visible thread stable through 200 unrelated streaming chunks', () => {
+    const { store, createMessagesSelector } = setup(80)
+    store.setState({ streaming: { visible: { conversationId: 'chat', authorId: 'agent', body: 'visible draft', sequence: 81 } } })
+    const select = createMessagesSelector('chat')
+    const visible = select(store.getState())
+    for (let index = 0; index < 200; index++) {
+      store.setState((state) => ({ streaming: { ...state.streaming,
+        background: { conversationId: 'other-chat', authorId: 'other-agent', body: `chunk ${index}`, sequence: index } } }))
+      assert.equal(select(store.getState()), visible, 'another room must not repaint this thread')
+    }
+    assert.equal(visible.at(-1)?.body, 'visible draft')
+  })
+
+  it('updates the active stream, then settles a saved message without a duplicate', () => {
+    const { store, createMessagesSelector } = setup(80)
+    const select = createMessagesSelector('chat')
+    const history = select(store.getState())
+    store.setState({ streaming: { draft: { conversationId: 'chat', authorId: 'agent', body: 'first chunk', sequence: 81 } } })
+    const first = select(store.getState())
+    assert.equal(first.length, history.length + 1)
+    assert.equal(first[0], history[0])
+    store.setState({ streaming: { draft: { conversationId: 'chat', authorId: 'agent', body: 'complete reply', sequence: 81 } } })
+    const next = select(store.getState())
+    assert.notEqual(next, first)
+    assert.equal(next.at(-1)?.body, 'complete reply')
+    const saved = { ...next.at(-1)!, body: 'saved reply' }
+    store.setState({ byConvo: { chat: [...history, saved] } })
+    const settled = select(store.getState())
+    assert.equal(settled.length, history.length + 1)
+    assert.equal(settled.at(-1), saved)
+    store.setState({ streaming: {} })
+    assert.equal(select(store.getState()), settled)
+  })
+
+  it('isolates mounted threads and does not reuse data after a workspace reset', () => {
+    const { store, createMessagesSelector } = setup(80)
+    const active = createMessagesSelector('chat')
+    const other = createMessagesSelector('other-chat')
+    const before = active(store.getState())
+    assert.equal(other(store.getState()).length, 0)
+    store.setState({ byConvo: { chat: [{ ...before[0], body: 'another workspace' }] } })
+    const after = active(store.getState())
+    assert.notEqual(after, before)
+    assert.equal(after[0].body, 'another workspace')
+    assert.equal(createMessagesSelector(null)(store.getState()).length, 0)
+  })
+})
 
 describe('message history after reconnect', () => {
   for (const method of ['reloadConversation', 'loadConversation'] as const) {

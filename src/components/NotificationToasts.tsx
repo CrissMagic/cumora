@@ -19,6 +19,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useT } from '@/lib/i18n'
 import { ws } from '@/api/client'
 import { useApp } from '@/stores/app'
+import { openNotificationConversation } from '@/lib/notificationNavigation'
+import { useAuth } from '@/stores/auth'
 import { useMe } from '@/stores/auth'
 import { useConversations, isMuted } from '@/stores/conversations'
 import { useParticipants } from '@/stores/participants'
@@ -38,6 +40,8 @@ interface Toast {
   kind: 'message' | 'doc.mention' | 'calendar.reminder'
   /** Set when kind === 'message'. The conversation the message belongs to. */
   conversationId?: string
+  companyId?: string
+  authorName?: string
   /** Set when kind === 'doc.mention'. The doc that was mentioned in. */
   documentId?: string
   /** Set when kind === 'calendar.reminder'. The calendar_event id; the
@@ -94,7 +98,11 @@ export function NotificationToasts() {
 
   useEffect(() => {
     const off = ws.on((e) => {
-      if (e.type !== 'message.new') return
+      if (e.type !== 'message.new' && e.type !== 'message.notification') return
+      const crossWorkspace = e.type === 'message.notification'
+        && e.companyId !== useAuth.getState().activeCompanyId
+      if (e.type === 'message.notification' && (!crossWorkspace || !e.recipientUserIds.includes(meRef.current ?? ''))) return
+      if (e.type === 'message.new' && e.companyId && e.companyId !== useAuth.getState().activeCompanyId) return
       const m = e.message
       // Never toast our own messages.
       if (m.authorId === meRef.current) return
@@ -106,29 +114,28 @@ export function NotificationToasts() {
       // sender) is worse than silent.
       if (m.kind === 'system') return
 
-      // Notifications fire ONLY when the app is NOT in the foreground.
-      // When the user is actively looking at the app, the new message
-      // lands in the visible thread — no toast needed regardless of
-      // which conversation they're viewing.
-      if (isWindowAttentive()) return
+      // The current workspace keeps its existing foreground behavior. A room
+      // in another workspace is not visible even while this app has focus.
+      if (!crossWorkspace && isWindowAttentive()) return
 
-      // Only toast for conversations the user is actually a member of.
-      // The WS bridge fans out CH_MESSAGE_NEW for every message in the
-      // user's company — including agent-to-agent private chats they're
-      // not in. Those land in the Whispers peek tab and must NOT pop
-      // toast notifications.
+      // Current workspace metadata comes from the authorized sidebar. Foreign
+      // rooms use a server-created recipient event, rechecked against live room
+      // membership by WS delivery; never infer access from workspace alone.
       const convo = useConversations.getState().list.find((c) => c.id === e.conversationId)
-      if (!convo) return
+      if (!crossWorkspace && !convo) return
       // Mute = silence, not "don't deliver". The message still lands in the
       // thread + bumps the per-row badge; we just skip the toast + chime.
-      if (isMuted(convo)) return
-      const title = convo.title
+      if (convo && isMuted(convo)) return
+      const workspaceName = crossWorkspace ? useAuth.getState().companies.find((c) => c.id === e.companyId)?.name : undefined
+      const title = e.type === 'message.notification'
+        ? [workspaceName, e.conversationTitle].filter(Boolean).join(' · ') : (convo?.title ?? '')
+      const authorName = e.type === 'message.notification' ? e.authorName : undefined
       const at = Date.now()
       // The conversation list comes from the API; `unread` is the
       // server's snapshot at last poll. The just-arrived message bumps
       // that by one in spirit, so add 1 here. Snapshot, not subscribed —
       // we don't want stale toasts to retroactively change badge.
-      const unreadCount = (convo.unread ?? 0) + 1
+      const unreadCount = (convo?.unread ?? 0) + 1
 
       // In Electron: forward to the dedicated notification BrowserWindow
       // that lives top-right of the primary display (see
@@ -142,8 +149,9 @@ export function NotificationToasts() {
           id: `toast-${m.id}-${at}`,
           messageId: m.id,
           conversationId: e.conversationId,
+          companyId: e.companyId,
           authorId: m.authorId,
-          authorName: author?.name ?? m.authorId,
+          authorName: authorName ?? author?.name ?? m.authorId,
           authorAvatarUrl: author?.avatarUrl ?? null,
           authorInitial: author?.initial ?? (author?.name ?? m.authorId).charAt(0).toUpperCase(),
           authorAvatarBg: author?.avatarBg,
@@ -164,7 +172,7 @@ export function NotificationToasts() {
         if (idx >= 0) {
           const next = prev.slice()
           next[idx] = {
-            ...next[idx], authorId: m.authorId, body: m.body || '(empty)',
+            ...next[idx], authorId: m.authorId, authorName, companyId: e.companyId, body: m.body || '(empty)',
             at, count: next[idx].count + 1, conversationTitle: title,
           }
           return next
@@ -174,7 +182,9 @@ export function NotificationToasts() {
           id: `toast-${m.id}-${at}`,
           kind: 'message',
           conversationId: e.conversationId,
+          companyId: e.companyId,
           authorId: m.authorId,
+          authorName,
           body: m.body || '(empty)',
           conversationTitle: title,
           at, count: 1,
@@ -278,9 +288,8 @@ export function NotificationToasts() {
     // Electron: subscribe to focus-convo requests from the notification
     // window. When the user clicks a toast over there, this fires here
     // and selects the conversation.
-    const offFocus = window.cumora?.notify?.onFocusConvo((conversationId) => {
-      setView('conversations')
-      select(conversationId)
+    const offFocus = window.cumora?.notify?.onFocusConvo((conversationId, companyId) => {
+      void openNotificationConversation(conversationId, companyId).catch((error) => console.warn('[notification] navigation failed', error))
     })
 
     return () => {
@@ -310,8 +319,7 @@ export function NotificationToasts() {
       // follow-up — Calendar will scroll to the day on load anyway.
       setView('calendar')
     } else if (t.conversationId) {
-      setView('conversations')
-      select(t.conversationId)
+      void openNotificationConversation(t.conversationId, t.companyId).catch((error) => console.warn('[notification] navigation failed', error))
     }
     dismiss(t.id)
   }
@@ -395,7 +403,7 @@ function ToastCard({ toast, onClick, onDismiss }: { toast: Toast; onClick: () =>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="text-[12.5px] font-semibold text-ink-900 truncate">
-              {toast.kind === 'calendar.reminder' ? toast.conversationTitle : (author?.name ?? toast.authorId)}
+              {toast.kind === 'calendar.reminder' ? toast.conversationTitle : (toast.authorName ?? author?.name ?? toast.authorId)}
             </span>
             <span className="text-[10.5px] text-ink-300 italic font-display truncate">
               {toast.kind === 'calendar.reminder' ? t('notif.calendarReminder') : toast.conversationTitle}

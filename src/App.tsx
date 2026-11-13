@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { useIsMobile } from '@/lib/utils'
 import { useApp } from '@/stores/app'
 import { isWindowAttentive, subscribeWindowAttention } from '@/lib/windowAttention'
@@ -9,11 +9,8 @@ import { bootParticipants, useParticipants } from '@/stores/participants'
 import { bootConversations, isMuted, useConversations } from '@/stores/conversations'
 import { bootWhispers, useWhispers } from '@/stores/whispers'
 import { bootComputers, useComputers } from '@/stores/computers'
-import { Onboarding } from '@/desktop/Onboarding'
 import { usePrefs } from '@/stores/preferences'
 import { api } from '@/api/client'
-import { DesktopApp } from '@/desktop/DesktopApp'
-import { MobileApp } from '@/mobile/MobileApp'
 import { AuthGate } from '@/components/AuthGate'
 import { NotificationToasts } from '@/components/NotificationToasts'
 import { NotificationWindow } from '@/components/NotificationWindow'
@@ -25,12 +22,22 @@ import {
   getPendingInvite, clearPendingInvite,
 } from '@/components/InviteAcceptScreen'
 import { UpdateBanner, UpdaterDialog } from '@/components/UpdaterDialog'
-import { AdminApp } from '@/admin/AdminApp'
 import { WaitlistConfirmedScreen, consumeWaitlistFragment } from '@/admin/WaitlistConfirmedScreen'
 import { SuspendedScreen, consumeSuspendedFragment } from '@/admin/SuspendedScreen'
 import { NoWorkspaceScreen } from '@/components/NoWorkspaceScreen'
 import { WorkspaceSessionBridge } from '@/components/WorkspaceSessionBridge'
 import '@/admin/admin.css'
+import { useT } from '@/lib/i18n'
+
+const DesktopApp = lazy(() => import('@/desktop/DesktopApp').then((module) => ({ default: module.DesktopApp })))
+const MobileApp = lazy(() => import('@/mobile/MobileApp').then((module) => ({ default: module.MobileApp })))
+const AdminApp = lazy(() => import('@/admin/AdminApp').then((module) => ({ default: module.AdminApp })))
+const Onboarding = lazy(() => import('@/desktop/Onboarding').then((module) => ({ default: module.Onboarding })))
+
+function AppLoading() {
+  const t = useT()
+  return <div role="status" className="h-[100dvh] grid place-items-center bg-paper text-sm text-ink-400">{t('common.loading')}</div>
+}
 
 /** True iff this browser tab is for the admin panel. On prod the
  *  hostname is admin.cumora.ai; in localhost dev the path prefix
@@ -184,7 +191,9 @@ function AuthedApp() {
 
   return (
     <>
-      {(needsOnboarding || forceOnboarding) ? <Onboarding /> : (isMobile ? <MobileApp /> : <DesktopApp />)}
+      <Suspense fallback={<AppLoading />}>
+        {(needsOnboarding || forceOnboarding) ? <Onboarding /> : (isMobile ? <MobileApp /> : <DesktopApp />)}
+      </Suspense>
       {/* In-app message toasts (window-blur / different-convo only) —
           rendered at the AuthedApp level so they share auth context and
           unmount cleanly on sign-out. */}
@@ -263,7 +272,7 @@ function MainApp() {
     return (
       <AuthGate>
         <ErrorBoundary>
-          <AdminApp />
+          <Suspense fallback={<AppLoading />}><AdminApp /></Suspense>
         </ErrorBoundary>
       </AuthGate>
     )

@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useApp } from '@/stores/app'
 import { useDocuments } from '@/stores/documents'
-import { DocumentEditor } from '@/components/DocumentEditor'
+import { LazyDocumentEditor as DocumentEditor } from '@/components/LazyDocumentEditor'
 import { IDoc } from '@/components/icons'
 import { useT } from '@/lib/i18n'
 

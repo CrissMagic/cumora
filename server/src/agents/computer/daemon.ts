@@ -19,6 +19,8 @@
  * Standalone: only Node builtins + the DB-free SSE parser + engine.ts.
  */
 
+import { Semaphore } from '../../concurrency.js'
+import { ConversationTurnControl, type ConversationControl } from './conversation-control.js'
 import { execFile, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, constants as FS_CONSTANTS, type FSWatcher, watch } from 'node:fs'
@@ -372,25 +374,8 @@ const TRIAGE_TIMEOUT_MS = 30_000
  *  immediately if a slot is free; otherwise it queues FIFO and resolves
  *  when an earlier holder releases. Pure in-process — bounded queue size
  *  follows the agent count (~7 typical), no memory concern. */
-class BigBrainSemaphore {
-  private inFlight = 0
-  private readonly waiters: Array<() => void> = []
-  constructor(private readonly max: number) {}
-  async acquire(): Promise<void> {
-    if (this.inFlight < this.max) {
-      this.inFlight += 1
-      return
-    }
-    await new Promise<void>((resolve) => this.waiters.push(resolve))
-    this.inFlight += 1
-  }
-  release(): void {
-    this.inFlight -= 1
-    const next = this.waiters.shift()
-    if (next) next()
-  }
-  /** Diagnostic only — number of waiters currently queued. */
-  get queueDepth(): number { return this.waiters.length }
+class BigBrainSemaphore extends Semaphore {
+  get queueDepth(): number { return this.queued }
 }
 const bigBrainSem = new BigBrainSemaphore(BIG_BRAIN_CONCURRENCY)
 const triageSem = new BigBrainSemaphore(TRIAGE_CONCURRENCY)
@@ -1589,7 +1574,7 @@ export class RuntimeCliBroker {
     this.timer.unref?.()
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.stopped = true
     this.rerunRequested = false
     this.abortController.abort()
@@ -1597,6 +1582,7 @@ export class RuntimeCliBroker {
     this.timer = null
     this.watcher?.close()
     this.watcher = null
+    return this.pollPromise?.catch(() => {}) ?? Promise.resolve()
   }
 
   /** Immediate poll for deterministic tests; the normal runner uses the timer. */
@@ -1702,10 +1688,11 @@ export class RuntimeCliBroker {
   }
 
   private async clearDir(dir: string): Promise<void> {
-    const names = await readdir(dir).catch(() => [] as string[])
+    const names = await readdir(dir)
     // These directories contain protocol files only. Never recurse into a
-    // model-created directory/junction while cleaning stale traffic.
-    await Promise.all(names.map((name) => rm(join(dir, name), { force: true }).catch(() => {})))
+    // model-created directory/junction while cleaning stale traffic. If a
+    // stale file cannot be cleared, refuse to reuse it under a new turn.
+    await Promise.all(names.map((name) => rm(join(dir, name), { force: true })))
   }
 }
 
@@ -1983,6 +1970,49 @@ export class AgentRunner {
    *  shim on PATH, so they go on posting AS the agent
    *  while the replacement runner independently answers the same messages. */
   private readonly teardown = new AbortController()
+  private readonly conversationControl = new ConversationTurnControl()
+  private cliBrokerNeedsRestart = false
+  private chatTurnSignal: AbortSignal | null = null
+  private controlTimer: ReturnType<typeof setInterval> | undefined
+  private refreshingControls: Promise<void> | null = null
+  private lastControlRefreshAt = 0
+  private readonly confirmedControls = new Map<string, number>()
+  private get executionSignal(): AbortSignal { return this.chatTurnSignal ?? this.teardown.signal }
+
+  /** SSE nudges are backed by this poll, including while the engine is busy. */
+  refreshConversationControls(): Promise<void> {
+    if (this.refreshingControls) return this.refreshingControls
+    const refresh = async () => {
+      const token = await this.ensureToken()
+      const rows = await runtimeGet<ConversationControl[]>(this.cfg.serverUrl, '/conversation-controls', token)
+      if (!rows) throw new Error('conversation controls unavailable')
+      this.lastControlRefreshAt = Date.now()
+      this.conversationControl.apply(rows)
+      if (this.conversationControl.cancelled) {
+        // Persistent transports have no per-send AbortSignal. Kill only the
+        // active session, keeping the runner and its broker available to resume.
+        const session = this.engineSession
+        this.engineSession = null
+        // Abort in-flight broker work and discard its queued files before the
+        // next model starts. Reusing the broker without this barrier would
+        // allow an old request to be claimed as part of a resumed turn.
+        if (this.cliBroker) this.cliBrokerNeedsRestart = true
+        await Promise.all([this.cliBroker?.stop(), session?.stop({ force: true })])
+      }
+      const paused = this.conversationControl.paused
+      this.projectBriefQueue = this.projectBriefQueue.filter((entry) => !entry.conversationId || !paused.has(entry.conversationId))
+      for (const row of this.conversationControl.stopped) {
+        if (this.confirmedControls.get(row.conversationId) === row.revision) continue
+        const ack = await runtimeBest(this.cfg.serverUrl, '/conversation-controls/ack', token, {
+          conversationId: row.conversationId, revision: row.revision,
+        })
+        if (ack) this.confirmedControls.set(row.conversationId, row.revision)
+      }
+    }
+    this.refreshingControls = refresh().finally(() => { this.refreshingControls = null })
+    return this.refreshingControls
+  }
+
   private token = ''
   private tokenExpiresAt = 0
   private home: string
@@ -2023,7 +2053,7 @@ export class AgentRunner {
   /** Synthetic work delivered with a wake has no durable chat row. Preserve it
    *  across debounce/coalescing so a brief-only Kanban assignment can drive the
    *  next turn instead of falling into the empty-inbox cost gate. */
-  private projectBriefQueue: Array<{ conversationId: string | null; brief: WakeBackgroundBrief }> = []
+  private projectBriefQueue: Array<{ conversationId: string | null; brief: WakeBackgroundBrief; controlRevision: number }> = []
   /** Pre-turn debounce timer (see WAKE_DEBOUNCE_MS). Non-null = a turn is already
    *  scheduled to start shortly; further wakes fold into it instead of stacking. */
   private wakeDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -2244,6 +2274,7 @@ export class AgentRunner {
     resumeSessionId: string | null,
     localImages: readonly string[] = [],
   ): Promise<EngineRunResult> {
+    this.executionSignal.throwIfAborted()
     const session = this.ensureEngineSession(resumeSessionId)
     const prompt = this.turnPrompt(session, delta)
     const nativeImages = this.nativeImagePaths(localImages)
@@ -2262,6 +2293,7 @@ export class AgentRunner {
       if (persistentFailure && !result.failure) result.failure = persistentFailure
       // A dead persistent transport that never reached the model is safe to
       // retry one-shot. Preserve the same resume target for continuity.
+      this.executionSignal.throwIfAborted()
       if (result.error && !result.usage && !session.alive && persistentFailure?.kind !== 'resume-not-found') {
         this.persistentUnusable = true
         this.engineSession = null
@@ -2278,7 +2310,7 @@ export class AgentRunner {
           localImages: nativeImages,
           onLog: (line) => this.logEngineLine(line),
           onHopUsage: (r) => this.onEngineHop(r, 'agent-turn'),
-          signal: this.teardown.signal,
+          signal: this.executionSignal,
         }))
       }
     } else {
@@ -2294,7 +2326,7 @@ export class AgentRunner {
         localImages: nativeImages,
         onLog: (line) => this.logEngineLine(line),
         onHopUsage: (r) => this.onEngineHop(r, 'agent-turn'),
-        signal: this.teardown.signal,
+        signal: this.executionSignal,
       }))
     }
     if (result.sessionId) this.setSessionId(result.sessionId)
@@ -2328,7 +2360,7 @@ export class AgentRunner {
         onFreshRetry: () => console.warn(`[computer] ${this.agent.id} retrying turn once with a fresh ${this.engine} session`),
       })
     }
-    return workspace ? withProjectWorkspaceLock(workspace.directory, this.teardown.signal, run) : run()
+    return workspace ? withProjectWorkspaceLock(workspace.directory, this.executionSignal, run) : run()
   }
 
   private async enterProjectWorkspace(workspace: LocalProjectWorkspace | null): Promise<void> {
@@ -2377,6 +2409,18 @@ export class AgentRunner {
     )
     await this.cliBroker.start()
     await this.loadSessionId()
+    // A control-read outage must not strand a half-started runner in sync()'s
+    // map. Start the stream/poll retry machinery; runTurn still fails closed
+    // before triage or a model call until a fresh control read succeeds.
+    await this.refreshConversationControls().catch((error) => {
+      console.warn(`[computer] ${this.agent.id} initial control refresh failed; will retry:`, error instanceof Error ? error.message : error)
+    })
+    this.controlTimer = setInterval(() => {
+      if (!this.stopped && (this.busy || Date.now() - this.lastControlRefreshAt >= 15_000)) void this.refreshConversationControls().catch((error) => {
+        console.warn(`[computer] ${this.agent.id} control refresh failed:`, error instanceof Error ? error.message : error)
+      })
+    }, 2000)
+    this.controlTimer.unref?.()
     void this.streamLoop()
     // SSE-independent safety net (see INBOX_POLL_MS): tick every 20s, but only
     // drain when the wake-stream can't be trusted (or the slow double-check is
@@ -2414,6 +2458,7 @@ export class AgentRunner {
    *  turn (and its engine child) running so a brief drain can let it finish. */
   beginStop(): void {
     this.stopped = true
+    if (this.controlTimer) { clearInterval(this.controlTimer); this.controlTimer = undefined }
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = undefined }
     this.streamAbort?.abort()
     if (this.wakeDebounceTimer) { clearTimeout(this.wakeDebounceTimer); this.wakeDebounceTimer = null }
@@ -2423,7 +2468,7 @@ export class AgentRunner {
     this.beginStop()
     const session = this.engineSession
     this.engineSession = null
-    this.cliBroker?.stop()
+    const brokerStop = this.cliBroker?.stop()
     this.cliBroker = null
     // Kill a one-shot engine child too. sync() tears a runner down on any
     // config change (engine/model/persona) or unassign while the daemon keeps
@@ -2435,6 +2480,7 @@ export class AgentRunner {
     this.hopReporter?.stop()
     this.hopReporter = null
     await Promise.allSettled([
+      brokerStop ?? Promise.resolve(),
       session?.stop({ force: options.forceEngine }) ?? Promise.resolve(),
       this.activeEngineRun ?? Promise.resolve(),
       this.activeTriage ?? Promise.resolve(),
@@ -2484,22 +2530,20 @@ export class AgentRunner {
    *  only argv strings; identity, URL, Authorization, redirects, and token
    *  refresh remain daemon-owned and cannot be changed by the model. */
   private async invokeRuntimeCli(argv: string[], lifecycleSignal: AbortSignal): Promise<RuntimeCliBrokerResult> {
-    if (lifecycleSignal.aborted) return { exitCode: 70, error: 'runtime IPC request cancelled' }
+    const turnSignal = this.executionSignal
+    const conversationRevisions = this.conversationControl.revisions
+    const signal = AbortSignal.any([lifecycleSignal, turnSignal, AbortSignal.timeout(HTTP_TIMEOUT_MS)])
+    if (signal.aborted) return { exitCode: 70, error: 'runtime IPC request cancelled' }
     // A local read-only capability. It neither needs nor receives a runtime JWT.
     if (argv[0] === 'research') return researchCommand(argv)
-    const requestAbort = new AbortController()
-    const timeout = setTimeout(() => requestAbort.abort(), HTTP_TIMEOUT_MS)
-    const onLifecycleAbort = () => requestAbort.abort()
-    if (lifecycleSignal.aborted) requestAbort.abort()
-    else lifecycleSignal.addEventListener('abort', onLifecycleAbort, { once: true })
     try {
-      const token = await this.ensureToken(requestAbort.signal)
-      if (requestAbort.signal.aborted) return { exitCode: 70, error: 'runtime IPC request cancelled' }
+      const token = await this.ensureToken(signal)
+      if (signal.aborted) return { exitCode: 70, error: 'runtime IPC request cancelled' }
       const res = await fetch(`${this.cfg.serverUrl}/runtime/cli`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ argv }),
-        signal: requestAbort.signal,
+        body: JSON.stringify({ argv, conversationRevisions }),
+        signal,
       })
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) this.invalidateToken(token)
@@ -2536,9 +2580,6 @@ export class AgentRunner {
       }
     } catch (err) {
       return { exitCode: 70, error: err instanceof Error ? err.message : String(err) }
-    } finally {
-      clearTimeout(timeout)
-      lifecycleSignal.removeEventListener('abort', onLifecycleAbort)
     }
   }
 
@@ -2714,16 +2755,17 @@ export class AgentRunner {
     // with the big-brain path (same Anthropic/OpenAI account quota, same
     // local CLI process pool) — every spawn waits its turn so the provider
     // never sees a burst of N simultaneous starts. See SpawnPacer doc.
-    await triageSem.acquire()
-    await spawnPacer.gate()
+    const turnSignal = this.executionSignal
+    await triageSem.acquire(turnSignal)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TRIAGE_TIMEOUT_MS)
-    const onStop = () => controller.abort(this.teardown.signal.reason)
-    this.teardown.signal.addEventListener('abort', onStop, { once: true })
+    const onStop = () => controller.abort(turnSignal.reason)
+    turnSignal.addEventListener('abort', onStop, { once: true })
     let res: { text: string; error?: string; usage?: EngineUsage; model?: string | null }
     try {
+      await spawnPacer.gate()
       await mkdir(TRIAGE_DIR, { recursive: true })
-      this.teardown.signal.throwIfAborted()
+      turnSignal.throwIfAborted()
       const pending = this.adapter.classify({
         cwd: TRIAGE_DIR,
         prompt: `${payload.instructions}\n\n${payload.input}`,
@@ -2741,9 +2783,10 @@ export class AgentRunner {
       clearTimeout(timer)
       triageSem.release()
       this.activeTriage = null
-      this.teardown.signal.removeEventListener('abort', onStop)
+      turnSignal.removeEventListener('abort', onStop)
     }
 
+    turnSignal.throwIfAborted()
     res.text = redactProviderSecret(res.text, this.provider)
     if (res.error) res.error = redactProviderSecret(res.error, this.provider)
     if (res.error || !res.text.trim()) {
@@ -3000,7 +3043,7 @@ export class AgentRunner {
   private async ackSeen(token: string, seen: Map<string, string>): Promise<void> {
     if (seen.size === 0) return
     await Promise.all([...seen].map(([conversationId, upToMessageId]) =>
-      runtimeBest(this.cfg.serverUrl, '/conversation/mark-read', token, { conversationId, upToMessageId }),
+      runtimeBest(this.cfg.serverUrl, '/conversation/mark-read', token, { conversationId, upToMessageId, conversationRevision: this.conversationControl.revisions?.[conversationId] ?? 0 }),
     ))
   }
 
@@ -3321,8 +3364,11 @@ export class AgentRunner {
     // Keep the conversation identity even before discovery observes a new
     // binding; merging here would make its project impossible to recover.
     const queued = this.projectBriefQueue.find((entry) => entry.conversationId === conversationId)
-    if (queued) queued.brief = mergeWakeBackgroundBriefs(queued.brief, brief) ?? brief
-    else this.projectBriefQueue.push({ conversationId, brief })
+    const controlRevision = conversationId ? this.conversationControl.revisionFor(conversationId) : 0
+    if (queued) {
+      queued.brief = queued.controlRevision === controlRevision ? mergeWakeBackgroundBriefs(queued.brief, brief) ?? brief : brief
+      queued.controlRevision = controlRevision
+    } else this.projectBriefQueue.push({ conversationId, brief, controlRevision })
   }
 
   private scheduleWake(
@@ -3355,7 +3401,8 @@ export class AgentRunner {
    *  direct pings, deduped per message, never interrupts the main task. */
   private async maybeSteer(convo: string): Promise<void> {
     const session = this.engineSession
-    if (!session?.alive || this.sideSteering) return
+    const turnSignal = this.chatTurnSignal
+    if (!session?.alive || !turnSignal || this.sideSteering) return
     // Budget spent → do not inject. The ping is already durable in `messages`
     // and the coalesced rerun reads it after this turn, so skipping the steer
     // costs latency, never the message.
@@ -3381,6 +3428,12 @@ export class AgentRunner {
       if (!inbox || inbox.projectWorkspaces?.length) return
       const rows = (inbox?.rows ?? []).filter((r) => r.conversation_id === convo)
       if (rows.length === 0) return
+      const prepareSteer = async (): Promise<boolean> => {
+        if (this.chatTurnSignal !== turnSignal || !this.conversationControl.include(convo)) return false
+        await this.refreshConversationControls()
+        turnSignal.throwIfAborted()
+        return this.chatTurnSignal === turnSignal && session.alive
+      }
       const direct = rows.some((r) =>
         r.conversation_kind === 'direct' ||
         r.author_kind === 'human' ||
@@ -3396,6 +3449,7 @@ export class AgentRunner {
         const latestGroup = rows[rows.length - 1]
         if (!latestGroup.id || latestGroup.id === this.lastGroupSteeredMsgId) return
         if (nowMs - this.lastGroupSteerAt < GROUP_STEER_MIN_INTERVAL_MS) return
+        if (!(await prepareSteer())) return
         this.lastGroupSteeredMsgId = latestGroup.id
         this.lastGroupSteerAt = nowMs
         const notice =
@@ -3413,6 +3467,7 @@ export class AgentRunner {
         console.log(`[computer] ${this.agent.id} STEER deferred (image attachment will be sent with the next full turn)`)
         return
       }
+      if (!(await prepareSteer())) return
       this.lastSteeredMsgId = latest.id
       const who = latest.author_name ?? 'someone'
       // 300 chars cut ordinary messages mid-sentence, so the agent answered
@@ -3451,327 +3506,379 @@ export class AgentRunner {
     const attemptedProjectScopes = new Set<string | null>()
     try {
       do {
-        this.pendingRerun = false
-        // Triage-trouble backoff: while triage is cooling down (after a rate-limit
-        // or a fail-open), skip the WHOLE turn — no triage call, no engine spawn —
-        // so we neither hammer a broken/throttled triage nor burn the big brain.
-        // The poll just no-ops until the window passes; unread messages are
-        // untouched and get triaged then.
-        if (Date.now() < this.triageBackoffUntil) {
-          const leftS = Math.round((this.triageBackoffUntil - Date.now()) / 1000)
-          console.log(`[computer] ${this.agent.id} skip (${reason}): triage backoff, ${leftS}s left`)
-          break
+        await this.refreshConversationControls()
+        if (this.cliBrokerNeedsRestart && this.cliBroker && !this.stopped) {
+          await this.cliBroker.start()
+          this.cliBrokerNeedsRestart = false
         }
-        // Big-brain rate-limit cooldown: the last attempt got throttled by the
-        // provider. Skip this turn cleanly (no triage call either — even small
-        // brain is wasted if we can't follow up with the big one). Unread is
-        // kept (no ack), so the next wake AFTER the cooldown will pick it up.
-        if (Date.now() < this.engineBackoffUntil) {
-          const leftS = Math.round((this.engineBackoffUntil - Date.now()) / 1000)
-          console.log(`[computer] ${this.agent.id} skip (${reason}): engine paused (${this.engineBackoffWhy}), ${leftS}s left`)
-          break
-        }
-        const turnStart = Date.now()
-        await this.ensureToken()
-        const token = this.token
-        // Consume the wake's conversation, so a later turn that reuses no wake
-        // can't flash phantom "typing" in whatever conversation last woke us.
-        // (The fallback below is derived from CURRENTLY unread messages, so it
-        // can't go stale the way a leftover wake value could.)
-        const queuedBrief = this.projectBriefQueue.shift()
-        const wakeConvo = queuedBrief ? queuedBrief.conversationId : this.lastWakeConvo
-        this.lastWakeConvo = null
-        activeBriefConversation = wakeConvo
-        activeBackgroundBrief = queuedBrief?.brief ?? null
-        if (this.projectBriefQueue.length > 0) this.pendingRerun = true
-        // Snapshot what's unread BEFORE triaging, so triage provably sees a
-        // superset of what we may ack — a real task that lands during/after
-        // triage keeps a higher id, stays out of `seen`, and so survives to
-        // drive the coalesced rerun rather than being silently acked away.
-        const { seen, digest, hasReal, projectIds, imagePaths, exhausted } = await this.snapshotUnread(token, wakeConvo, !!activeBackgroundBrief, attemptedProjectScopes)
-        if (exhausted) break
-        if (this.inboxProjectScope !== undefined) attemptedProjectScopes.add(this.inboxProjectScope)
-        // Which conversation should show "<agent> is typing…"? Prefer the one the
-        // wake named, but fall back to the unread we just snapshotted, because a
-        // wake often carries no conversation at all:
-        //
-        //   - a POLL-driven turn never has one (only an SSE wake sets
-        //     lastWakeConvo), and polling is the ONLY path left whenever the
-        //     wake-stream is down;
-        //   - a wake that arrives while this agent is mid-turn is coalesced, and
-        //     scheduleWake's busy branch re-kicks without a conversation.
-        //
-        // Both cases are exactly when a human IS waiting, and with no indicator
-        // the agent reads as dead: it can work for minutes — engine spawned, turn
-        // running — while the room shows nothing at all.
-        const scopedWake = this.inboxProjectScope !== undefined && !activeBackgroundBrief && wakeConvo && !seen.has(wakeConvo) ? null : wakeConvo
-        const convo = typingConversation(scopedWake, seen)
-        // HARD COST GATE (content-blind, fail-closed): system-only inbox noise
-        // is not a task. A validated manual backgroundBrief IS a task, though:
-        // Kanban assignment/mention wakes deliberately have no chat row, and
-        // dropping that SSE payload here was why BYOA cards stayed in Todo.
-        if (!wakeHasActionableInput(hasReal, activeBackgroundBrief)) {
-          await this.ackSeen(token, seen)
-          await this.postStatus(token, 'avail')
-          // No per-tick log: this is the idle steady state (every poll × agent),
-          // same reasoning as the 'inbox empty' skip below.
-          // Chat is idle → maybe there's assigned BOARD work to proactively pick up
-          // (quiet+throttle gated, so this isn't a per-poll cost).
-          await this.maybeAgendaTurn(token)
-          continue
-        }
-        // A deliberate manual brief is already actionable, just like the cloud
-        // `briefedManual` path. Only ordinary inbox wakes need the small-brain
-        // triage decision.
-        const triage = activeBackgroundBrief ? null : await this.inboxTriage(token)
-        if (this.stopped) break
-        const triageMs = Date.now() - turnStart // ensureToken + snapshot + triage
-        // Triage was rate-limited → STOP. Do NOT retry, do NOT wake the big brain,
-        // do NOT ack (the message is retried after the cooldown). Back off
-        // exponentially so a throttled model can't be hammered into burning the
-        // user's quota. This is the guard against the infinite-retry runaway.
-        if (triage?.source === 'rate-limited') {
-          this.triageTroubleStreak += 1
-          const backoff = Math.min(10 * 60_000, 30_000 * 2 ** (this.triageTroubleStreak - 1))
-          this.triageBackoffUntil = Date.now() + backoff
-          console.warn(`[computer] ${this.agent.id} triage RATE-LIMITED (#${this.triageTroubleStreak}, triage ${triageMs}ms) — backing off ${Math.round(backoff / 1000)}s, NOT waking the big brain, not acking`)
-          await this.postStatus(token, 'avail')
-          break
-        }
-        // FAIL-OPEN is a triage FAILURE, not a confirmed real task — so it must
-        // NEVER wake the expensive big brain (that escalation was the leak that
-        // burned quota). Treat it like a rate-limit: skip, do NOT ack (retry next
-        // poll once triage recovers), and back off so a persistently-broken triage
-        // isn't re-hit — and never spends opus — every poll.
-        if (triage?.source === 'fail-open') {
-          this.triageTroubleStreak += 1
-          const backoff = Math.min(10 * 60_000, 30_000 * 2 ** (this.triageTroubleStreak - 1))
-          this.triageBackoffUntil = Date.now() + backoff
-          console.warn(`[computer] ${this.agent.id} triage FAIL-OPEN (#${this.triageTroubleStreak}, triage ${triageMs}ms) — NOT waking the big brain, backing off ${Math.round(backoff / 1000)}s, not acking`)
-          await this.postStatus(token, 'avail')
-          break
-        }
-        // A clean, usable triage clears any prior backoff.
-        this.triageTroubleStreak = 0
-        this.triageBackoffUntil = 0
-        if (triage?.actionable === false) {
-          const skipReason = typeof triage.reason === 'string' ? triage.reason : 'not relevant'
-          // Only log a MEANINGFUL skip. An empty inbox is the idle steady state
-          // (every INBOX_POLL_MS tick × every agent) — logging it floods the
-          // console with identical "inbox empty" lines and tells us nothing.
-          if (skipReason !== 'inbox empty') {
-            console.log(`[computer] ${this.agent.id} skip (${reason}, triage ${triageMs}ms): ${skipReason}`)
+        this.chatTurnSignal = AbortSignal.any([this.teardown.signal, this.conversationControl.begin()])
+        let controlRunId: string | undefined
+        try {
+          this.pendingRerun = false
+          // Triage-trouble backoff: while triage is cooling down (after a rate-limit
+          // or a fail-open), skip the WHOLE turn — no triage call, no engine spawn —
+          // so we neither hammer a broken/throttled triage nor burn the big brain.
+          // The poll just no-ops until the window passes; unread messages are
+          // untouched and get triaged then.
+          if (Date.now() < this.triageBackoffUntil) {
+            const leftS = Math.round((this.triageBackoffUntil - Date.now()) / 1000)
+            console.log(`[computer] ${this.agent.id} skip (${reason}): triage backoff, ${leftS}s left`)
+            break
           }
-          // Ack the chatter the small brain just dismissed. Without this the
-          // unread sticks and the INBOX_POLL_MS drain re-triages it forever —
-          // the loop that woke (or nearly woke) the big brain on every tick.
-          await this.ackSeen(token, seen)
-          await this.postStatus(token, 'avail')
-          // Chat had nothing for us → maybe proactively pick up assigned board work.
-          await this.maybeAgendaTurn(token)
-          continue
-        }
-        // Mirror the cloud agent EXACTLY (turn.ts): the small brain ONLY gated
-        // (actionable). It does NOT decide who replies, how, or — for a relay /
-        // chain — who continues, and it NEVER writes content. Wake the big engine,
-        // hand it the triage note + the shared glance-yield protocol, and let it
-        // self-coordinate IN-TURN (glance → yield to earlier claimants → continue
-        // the chain, never restart). That is the exact path that lets the cloud pod
-        // play 成语接龙 cleanly. The old BYOA-only orchestration here — responseMode
-        // routing, one-of-us claimReply, mechanical direct-post, relay turn-claim —
-        // was the divergence that broke chains and is GONE. Cost backstops remain:
-        // the actionable gate above + the per-minute activation rate floor.
-        const gateLabel = activeBackgroundBrief
-          ? `manual brief ${activeBackgroundBrief.source ?? 'unknown'}`
-          : `triage ${triageMs}ms`
-        console.log(`[computer] ${this.agent.id} turn START (${reason}) — ${gateLabel}, spawning ${this.adapter.id}${convo ? ` for ${convo}` : ''}`)
-        await this.postStatus(token, 'thinking')
-        // "<agent> is typing…" in the conversation that woke us, refreshed
-        // while the engine works (BYOA runs can be long), cleared at the end.
-        let typingTimer: ReturnType<typeof setInterval> | undefined
-        // Rooms this turn claims as "composing", and the SAME list the finally
-        // block releases. Claiming one set and releasing another left unread
-        // rooms' claims and HELD counters alive past the turn (see
-        // turnThinkingConvos). Empty without a typing room, because the claim
-        // below is gated on that room existing.
-        const thinkingIds: string[] = convo ? turnThinkingConvos(convo, seen) : []
-        if (convo) {
-          const ping = (): void => { void runtimeBest(this.cfg.serverUrl, '/typing', token, { conversationId: convo, done: false }) }
-          // Stamp every conversation in this wake, not just the trigger.
-          // Mixed-project wakes then fall back to GLOBAL on memory writes
-          // instead of guessing the trigger group's project.
-          const thinkingPing = (): void => { void runtimeBest(this.cfg.serverUrl, '/thinking/mark', token, { conversationIds: thinkingIds, ttlSec: 60 }) }
-          ping()
-          thinkingPing()
-          typingTimer = setInterval(() => {
+          // Big-brain rate-limit cooldown: the last attempt got throttled by the
+          // provider. Skip this turn cleanly (no triage call either — even small
+          // brain is wasted if we can't follow up with the big one). Unread is
+          // kept (no ack), so the next wake AFTER the cooldown will pick it up.
+          if (Date.now() < this.engineBackoffUntil) {
+            const leftS = Math.round((this.engineBackoffUntil - Date.now()) / 1000)
+            console.log(`[computer] ${this.agent.id} skip (${reason}): engine paused (${this.engineBackoffWhy}), ${leftS}s left`)
+            break
+          }
+          const turnStart = Date.now()
+          await this.ensureToken()
+          const token = this.token
+          // Consume the wake's conversation, so a later turn that reuses no wake
+          // can't flash phantom "typing" in whatever conversation last woke us.
+          // (The fallback below is derived from CURRENTLY unread messages, so it
+          // can't go stale the way a leftover wake value could.)
+          const queuedBrief = this.projectBriefQueue.shift()
+          const wakeConvo = queuedBrief ? queuedBrief.conversationId : this.lastWakeConvo
+          this.lastWakeConvo = null
+          activeBriefConversation = wakeConvo
+          activeBackgroundBrief = queuedBrief?.brief ?? null
+          if (wakeConvo && (this.conversationControl.paused.has(wakeConvo)
+            || (queuedBrief && queuedBrief.controlRevision !== this.conversationControl.revisionFor(wakeConvo)))) {
+            activeBackgroundBrief = null
+            // Its unread chat stays durable, but synthetic queued work is cancelled.
+          }
+          if (this.projectBriefQueue.length > 0) this.pendingRerun = true
+          // Snapshot what's unread BEFORE triaging, so triage provably sees a
+          // superset of what we may ack — a real task that lands during/after
+          // triage keeps a higher id, stays out of `seen`, and so survives to
+          // drive the coalesced rerun rather than being silently acked away.
+          const { seen, digest, hasReal, projectIds, imagePaths, exhausted } = await this.snapshotUnread(token, wakeConvo, !!activeBackgroundBrief, attemptedProjectScopes)
+          this.conversationControl.scope([...seen.keys(), ...(activeBackgroundBrief && wakeConvo ? [wakeConvo] : [])])
+          await this.refreshConversationControls()
+          this.executionSignal.throwIfAborted()
+          if (exhausted) break
+          if (this.inboxProjectScope !== undefined) attemptedProjectScopes.add(this.inboxProjectScope)
+          // Which conversation should show "<agent> is typing…"? Prefer the one the
+          // wake named, but fall back to the unread we just snapshotted, because a
+          // wake often carries no conversation at all:
+          //
+          //   - a POLL-driven turn never has one (only an SSE wake sets
+          //     lastWakeConvo), and polling is the ONLY path left whenever the
+          //     wake-stream is down;
+          //   - a wake that arrives while this agent is mid-turn is coalesced, and
+          //     scheduleWake's busy branch re-kicks without a conversation.
+          //
+          // Both cases are exactly when a human IS waiting, and with no indicator
+          // the agent reads as dead: it can work for minutes — engine spawned, turn
+          // running — while the room shows nothing at all.
+          const scopedWake = wakeConvo && this.conversationControl.paused.has(wakeConvo) ? null : this.inboxProjectScope !== undefined && !activeBackgroundBrief && wakeConvo && !seen.has(wakeConvo) ? null : wakeConvo
+          const convo = typingConversation(scopedWake, seen)
+          // HARD COST GATE (content-blind, fail-closed): system-only inbox noise
+          // is not a task. A validated manual backgroundBrief IS a task, though:
+          // Kanban assignment/mention wakes deliberately have no chat row, and
+          // dropping that SSE payload here was why BYOA cards stayed in Todo.
+          if (!wakeHasActionableInput(hasReal, activeBackgroundBrief)) {
+            await this.ackSeen(token, seen)
+            await this.postStatus(token, 'avail')
+            // No per-tick log: this is the idle steady state (every poll × agent),
+            // same reasoning as the 'inbox empty' skip below.
+            // Chat is idle → maybe there's assigned BOARD work to proactively pick up
+            // (quiet+throttle gated, so this isn't a per-poll cost).
+            this.chatTurnSignal = null
+            this.conversationControl.finish()
+            await this.maybeAgendaTurn(token)
+            continue
+          }
+          // A deliberate manual brief is already actionable, just like the cloud
+          // `briefedManual` path. Only ordinary inbox wakes need the small-brain
+          // triage decision.
+          const triage = activeBackgroundBrief ? null : await this.inboxTriage(token)
+          this.executionSignal.throwIfAborted()
+          if (this.stopped) break
+          const triageMs = Date.now() - turnStart // ensureToken + snapshot + triage
+          // Triage was rate-limited → STOP. Do NOT retry, do NOT wake the big brain,
+          // do NOT ack (the message is retried after the cooldown). Back off
+          // exponentially so a throttled model can't be hammered into burning the
+          // user's quota. This is the guard against the infinite-retry runaway.
+          if (triage?.source === 'rate-limited') {
+            this.triageTroubleStreak += 1
+            const backoff = Math.min(10 * 60_000, 30_000 * 2 ** (this.triageTroubleStreak - 1))
+            this.triageBackoffUntil = Date.now() + backoff
+            console.warn(`[computer] ${this.agent.id} triage RATE-LIMITED (#${this.triageTroubleStreak}, triage ${triageMs}ms) — backing off ${Math.round(backoff / 1000)}s, NOT waking the big brain, not acking`)
+            await this.postStatus(token, 'avail')
+            break
+          }
+          // FAIL-OPEN is a triage FAILURE, not a confirmed real task — so it must
+          // NEVER wake the expensive big brain (that escalation was the leak that
+          // burned quota). Treat it like a rate-limit: skip, do NOT ack (retry next
+          // poll once triage recovers), and back off so a persistently-broken triage
+          // isn't re-hit — and never spends opus — every poll.
+          if (triage?.source === 'fail-open') {
+            this.triageTroubleStreak += 1
+            const backoff = Math.min(10 * 60_000, 30_000 * 2 ** (this.triageTroubleStreak - 1))
+            this.triageBackoffUntil = Date.now() + backoff
+            console.warn(`[computer] ${this.agent.id} triage FAIL-OPEN (#${this.triageTroubleStreak}, triage ${triageMs}ms) — NOT waking the big brain, backing off ${Math.round(backoff / 1000)}s, not acking`)
+            await this.postStatus(token, 'avail')
+            break
+          }
+          // A clean, usable triage clears any prior backoff.
+          this.triageTroubleStreak = 0
+          this.triageBackoffUntil = 0
+          if (triage?.actionable === false) {
+            const skipReason = typeof triage.reason === 'string' ? triage.reason : 'not relevant'
+            // Only log a MEANINGFUL skip. An empty inbox is the idle steady state
+            // (every INBOX_POLL_MS tick × every agent) — logging it floods the
+            // console with identical "inbox empty" lines and tells us nothing.
+            if (skipReason !== 'inbox empty') {
+              console.log(`[computer] ${this.agent.id} skip (${reason}, triage ${triageMs}ms): ${skipReason}`)
+            }
+            // Ack the chatter the small brain just dismissed. Without this the
+            // unread sticks and the INBOX_POLL_MS drain re-triages it forever —
+            // the loop that woke (or nearly woke) the big brain on every tick.
+            await this.ackSeen(token, seen)
+            await this.postStatus(token, 'avail')
+            // Chat had nothing for us → maybe proactively pick up assigned board work.
+            this.chatTurnSignal = null
+            this.conversationControl.finish()
+            await this.maybeAgendaTurn(token)
+            continue
+          }
+          // Mirror the cloud agent EXACTLY (turn.ts): the small brain ONLY gated
+          // (actionable). It does NOT decide who replies, how, or — for a relay /
+          // chain — who continues, and it NEVER writes content. Wake the big engine,
+          // hand it the triage note + the shared glance-yield protocol, and let it
+          // self-coordinate IN-TURN (glance → yield to earlier claimants → continue
+          // the chain, never restart). That is the exact path that lets the cloud pod
+          // play 成语接龙 cleanly. The old BYOA-only orchestration here — responseMode
+          // routing, one-of-us claimReply, mechanical direct-post, relay turn-claim —
+          // was the divergence that broke chains and is GONE. Cost backstops remain:
+          // the actionable gate above + the per-minute activation rate floor.
+          const gateLabel = activeBackgroundBrief
+            ? `manual brief ${activeBackgroundBrief.source ?? 'unknown'}`
+            : `triage ${triageMs}ms`
+          console.log(`[computer] ${this.agent.id} turn START (${reason}) — ${gateLabel}, spawning ${this.adapter.id}${convo ? ` for ${convo}` : ''}`)
+          await this.postStatus(token, 'thinking')
+          // "<agent> is typing…" in the conversation that woke us, refreshed
+          // while the engine works (BYOA runs can be long), cleared at the end.
+          let typingTimer: ReturnType<typeof setInterval> | undefined
+          // Rooms this turn claims as "composing", and the SAME list the finally
+          // block releases. Claiming one set and releasing another left unread
+          // rooms' claims and HELD counters alive past the turn (see
+          // turnThinkingConvos). Empty without a typing room, because the claim
+          // below is gated on that room existing.
+          const thinkingIds: string[] = convo ? turnThinkingConvos(convo, seen) : []
+          if (convo) {
+            const ping = (): void => { void runtimeBest(this.cfg.serverUrl, '/typing', token, { conversationId: convo, done: false }) }
+            // Stamp every conversation in this wake, not just the trigger.
+            // Mixed-project wakes then fall back to GLOBAL on memory writes
+            // instead of guessing the trigger group's project.
+            const thinkingPing = (): void => { void runtimeBest(this.cfg.serverUrl, '/thinking/mark', token, { conversationIds: thinkingIds, ttlSec: 60 }) }
             ping()
             thinkingPing()
-          }, 6000)
-          // Compose-anchor is now stamped by the /thinking/mark handler on
-          // server side (it has the agent + convo already), pinned to THIS
-          // turn's start. Independent of the seen-baseline (which glance/
-          // messages advance) — so a peer post landing during compose still
-          // HOLDs the reply even after the agent later glances and "absorbs"
-          // it. Closes the 光-光 collision: two agents both saw 爻, both
-          // drafted 光, and the second glance silently advanced past the
-          // first poster's message; preflight previously saw "nothing newer."
-        }
-        const run = (await runtimeBest(this.cfg.serverUrl, '/runs', token, {
-          trigger: {
-            source: activeBackgroundBrief ? 'byoa-manual' : 'byoa',
-            engine: this.adapter.id,
-            ...(activeBackgroundBrief
-              ? {
-                  backgroundBrief: {
-                    source: activeBackgroundBrief.source ?? 'manual',
-                    title: activeBackgroundBrief.title,
-                  },
-                }
-              : {}),
-          },
-        })) as { runId?: string } | null
-        // Pin runId so per-hop ledger rows link back to this turn (see
-        // maybeAgendaTurn for the same hook).
-        this.currentRunId = run?.runId ?? null
-        const stopRunBeat = this.beatRun(token, run?.runId)
-        let exitCode = 0
-        let engineError: string | null = null
-        let turnUsage: EngineUsage | undefined
-        let turnModel: string | null | undefined
-        // Per-computer concurrency gate + deterministic spawn pacer.
-        // Pacer enforces a minimum interval between back-to-back spawns
-        // (shared with triage path) so the provider never sees a burst of
-        // N simultaneous starts. Random jitter (the earlier approach)
-        // was probabilistic — by chance several waiters could roll near-
-        // zero and still slam the API; deterministic pacing makes the
-        // burst rate a hard 1/(MIN_SPAWN_INTERVAL_MS) regardless of
-        // concurrent waiter count.
-        await bigBrainSem.acquire()
-        await spawnPacer.gate()
-        const semQueueDepth = bigBrainSem.queueDepth
-        if (semQueueDepth > 0) {
-          console.log(`[computer] ${this.agent.id} big-brain sem acquired (queue depth was ${semQueueDepth + 1} including self)`)
-        }
-        try {
-          const turnBackgroundBrief = activeBackgroundBrief
-          const [memoryDigest, triageNote, roster] = await Promise.all([
-            this.memoryDigest(projectIds),
-            Promise.resolve(this.formatTriageNote(triage)),
-            // Live team roster (names + roles + ids), fetched fresh from the
-            // server so a locally-run agent knows WHO its teammates are and what
-            // each does — the cloud agent gets this in its system prompt. Only
-            // fetched here, right before a real turn, so no-op wakes pay nothing.
-            runtimeGet<{ roster: string }>(this.cfg.serverUrl, '/roster', token)
-              .then((r) => r?.roster ?? '').catch(() => ''),
-          ])
-          this.teardown.signal.throwIfAborted()
-          const delta = turnBackgroundBrief
-            ? this.manualBriefDelta(turnBackgroundBrief, memoryDigest, digest, roster)
-            : this.chatDelta(memoryDigest, triageNote, digest, roster)
-          const result = await this.runWithSessionRecovery(delta, imagePaths)
-          exitCode = result.exitCode
-          turnUsage = result.usage
-          turnModel = result.model
-          if (result.error) engineError = this.visibleEngineError(exitCode, result.failure?.message ?? result.error)
-          // A stale resume OR a context-window overflow means this session can't
-          // be carried forward — drop it AND tear down any persistent process so
-          // the next wake starts clean (otherwise --resume re-overflows forever).
-          if (engineError && result.failure?.kind !== 'resume-not-found' && this.mustResetSession(engineError, false)) {
-            await this.resetEngineSession(this.resetReason(engineError))
+            typingTimer = setInterval(() => {
+              ping()
+              thinkingPing()
+            }, 6000)
+            // Compose-anchor is now stamped by the /thinking/mark handler on
+            // server side (it has the agent + convo already), pinned to THIS
+            // turn's start. Independent of the seen-baseline (which glance/
+            // messages advance) — so a peer post landing during compose still
+            // HOLDs the reply even after the agent later glances and "absorbs"
+            // it. Closes the 光-光 collision: two agents both saw 爻, both
+            // drafted 光, and the second glance silently advanced past the
+            // first poster's message; preflight previously saw "nothing newer."
           }
-        } catch (err) {
-          console.error(`[computer] ${this.agent.id} engine spawn failed:`, redactProviderSecret(err instanceof Error ? err.message : String(err), this.provider))
-          exitCode = 1
-          engineError = this.visibleEngineError(exitCode, err instanceof Error ? (err.stack || err.message) : String(err))
+          const run = (await runtimeBest(this.cfg.serverUrl, '/runs', token, {
+            trigger: {
+              source: activeBackgroundBrief ? 'byoa-manual' : 'byoa',
+              engine: this.adapter.id,
+              ...(activeBackgroundBrief
+                ? {
+                    backgroundBrief: {
+                      source: activeBackgroundBrief.source ?? 'manual',
+                      title: activeBackgroundBrief.title,
+                    },
+                  }
+                : {}),
+            },
+          })) as { runId?: string } | null
+          // Pin runId so per-hop ledger rows link back to this turn (see
+          // maybeAgendaTurn for the same hook).
+          controlRunId = run?.runId
+          this.currentRunId = run?.runId ?? null
+          const stopRunBeat = this.beatRun(token, run?.runId)
+          let exitCode = 0
+          let engineError: string | null = null
+          let turnUsage: EngineUsage | undefined
+          let turnModel: string | null | undefined
+          // Per-computer concurrency gate + deterministic spawn pacer.
+          // Pacer enforces a minimum interval between back-to-back spawns
+          // (shared with triage path) so the provider never sees a burst of
+          // N simultaneous starts. Random jitter (the earlier approach)
+          // was probabilistic — by chance several waiters could roll near-
+          // zero and still slam the API; deterministic pacing makes the
+          // burst rate a hard 1/(MIN_SPAWN_INTERVAL_MS) regardless of
+          // concurrent waiter count.
+          let acquired = false
+          const semQueueDepth = bigBrainSem.queueDepth
+          if (semQueueDepth > 0) {
+            console.log(`[computer] ${this.agent.id} big-brain sem acquired (queue depth was ${semQueueDepth + 1} including self)`)
+          }
+          try {
+            await bigBrainSem.acquire(this.executionSignal)
+            acquired = true
+            await spawnPacer.gate()
+            this.executionSignal.throwIfAborted()
+            const turnBackgroundBrief = activeBackgroundBrief
+            const [memoryDigest, triageNote, roster] = await Promise.all([
+              this.memoryDigest(projectIds),
+              Promise.resolve(this.formatTriageNote(triage)),
+              // Live team roster (names + roles + ids), fetched fresh from the
+              // server so a locally-run agent knows WHO its teammates are and what
+              // each does — the cloud agent gets this in its system prompt. Only
+              // fetched here, right before a real turn, so no-op wakes pay nothing.
+              runtimeGet<{ roster: string }>(this.cfg.serverUrl, '/roster', token)
+                .then((r) => r?.roster ?? '').catch(() => ''),
+            ])
+            this.executionSignal.throwIfAborted()
+            const delta = turnBackgroundBrief
+              ? this.manualBriefDelta(turnBackgroundBrief, memoryDigest, digest, roster)
+              : this.chatDelta(memoryDigest, triageNote, digest, roster)
+            const result = await this.runWithSessionRecovery(delta, imagePaths)
+            await this.refreshConversationControls()
+            this.executionSignal.throwIfAborted()
+            exitCode = result.exitCode
+            turnUsage = result.usage
+            turnModel = result.model
+            if (result.error) engineError = this.visibleEngineError(exitCode, result.failure?.message ?? result.error)
+            // A stale resume OR a context-window overflow means this session can't
+            // be carried forward — drop it AND tear down any persistent process so
+            // the next wake starts clean (otherwise --resume re-overflows forever).
+            if (engineError && result.failure?.kind !== 'resume-not-found' && this.mustResetSession(engineError, false)) {
+              await this.resetEngineSession(this.resetReason(engineError))
+            }
+          } catch (err) {
+            if (this.conversationControl.cancelled || this.stopped) throw err
+            console.error(`[computer] ${this.agent.id} engine spawn failed:`, redactProviderSecret(err instanceof Error ? err.message : String(err), this.provider))
+            exitCode = 1
+            engineError = this.visibleEngineError(exitCode, err instanceof Error ? (err.stack || err.message) : String(err))
+          } finally {
+            stopRunBeat()
+            if (typingTimer) clearInterval(typingTimer)
+            // Per-turn ledger drain (mirrors the agenda finally above).
+            this.currentRunId = null
+            if (convo) {
+              await runtimeBest(this.cfg.serverUrl, '/typing', token, { conversationId: convo, done: true })
+            }
+            // Release EVERY room this turn claimed. The indicator room is the one
+            // the human sees, but the claim — and the per-turn HELD count cleared
+            // alongside it — belongs to all of them.
+            if (thinkingIds.length > 0) {
+              await runtimeBest(this.cfg.serverUrl, '/thinking/unmark', token, { conversationIds: thinkingIds })
+            }
+            // Release the semaphore slot regardless of success / error — the
+            // next queued agent can now spawn. MUST be in the same finally
+            // that runs after the spawn await completes (success / error /
+            // abort), otherwise a stuck slot starves the whole computer.
+            if (acquired) bigBrainSem.release()
+          }
+          // Rate-limit case: when the underlying provider (Anthropic / OpenAI)
+          // throttles us, this is NOT an agent-visible failure — the unread
+          // survives (we skip ackSeen below for any engineError), the next wake
+          // re-attempts, and jitter above plus this skip-the-notice keeps the
+          // user from seeing a row of "byoa_engine_failed" markers in chat for
+          // what is really a transient provider throttle. Persist a quieter
+          // signal to the run row instead so it shows up in observability.
+          const outcome = classifyTurnOutcome(engineError)
+          const rateLimited = outcome === 'rate-limited'
+          // An engine nobody has logged into will fail the same way on the next
+          // poll, and the one after that. Cool down like a rate limit so the
+          // machine stops spinning, but tell the user — a silent backoff on a
+          // fixable problem is just a slower way of never working.
+          if (outcome === 'operator-fix') {
+            console.warn(`[computer] ${this.agent.id} engine needs operator action — pausing ${Math.round(ENGINE_BACKOFF_AFTER_OPERATOR_FIX_MS / 60000)}min: ${engineError?.slice(0, 160)}`)
+          }
+          if (engineError && !rateLimited) {
+            await this.publishEngineFailure({
+              token,
+              runId: run?.runId,
+              conversationId: convo,
+              error: engineError,
+              exitCode,
+            })
+          }
+          if (engineError && rateLimited) {
+            // ENTER cooldown: this agent skips its own turns for the
+            // configured window. The unread is kept (no ack, see below);
+            // the next wake AFTER the cooldown will pick it up cleanly.
+            // Also clear pendingRerun so the do-while loop exits — there's
+            // no point in immediately re-attempting against the same throttle.
+            // ALSO tell the global adaptive pacer to slow down — multiple
+            // agents hitting rate-limit means the current interval is too
+            // aggressive for the account's actual burst quota.
+            this.pendingRerun = false
+            spawnPacer.onRateLimited()
+            console.warn(`[computer] ${this.agent.id} engine RATE-LIMITED (sem queue depth was ${semQueueDepth}) — cooling down ${Math.round(ENGINE_BACKOFF_AFTER_RATE_LIMIT_MS / 1000)}s, pacer now ${spawnPacer.intervalMs}ms`)
+          } else if (outcome === 'ok') {
+            // Clean turn → signal the pacer; the backoff itself is cleared below.
+            spawnPacer.onOk()
+          }
+          this.applyTurnBackoff(outcome)
+          if (run?.runId) {
+            await runtimeBest(this.cfg.serverUrl, `/runs/${run.runId}/finish`, token, {
+              status: exitCode === 0 ? 'completed' : 'failed',
+              summary: rateLimited ? `rate-limited (deferred for retry)` : (engineError ?? `byoa ${this.adapter.id} run (exit ${exitCode})`),
+              error: rateLimited ? null : engineError,
+              model: turnModel ?? this.agent.model,
+              usage: turnUsage ? usageFromClaude(turnUsage) : null,
+            })
+          }
+          if (engineError && activeBackgroundBrief) {
+            this.queueBackgroundBrief(activeBackgroundBrief, activeBriefConversation)
+            this.pendingRerun = false
+          }
+          activeBackgroundBrief = null
+          // Clean turn → ack everything this turn saw. If the engine replied it
+          // already advanced these cursors (monotonic ack is a no-op then); if it
+          // read the room and chose silence, this is what stops the same inbox
+          // from re-waking the big brain on the next drain. On engine FAILURE we
+          // skip the ack so the unread survives for a retry / next wake.
+          if (!engineError) await this.ackSeen(token, seen)
+          await this.postStatus(token, 'avail')
+          // A chat turn resets the "quiet" anchor: an agent that just acted in chat
+          // isn't immediately pulled into an agenda turn (mirrors the cloud idle
+          // scheduler only picking agents quiet for N minutes).
+          this.lastTurnEndedAt = Date.now()
+          console.log(`[computer] ${this.agent.id} turn DONE (${reason}) — total ${Date.now() - turnStart}ms, exit ${exitCode}${this.pendingRerun ? ' · rerun queued' : ''}`)
+          reason = 'rerun (coalesced wake)'
+        } catch (error) {
+          if (!this.conversationControl.cancelled) throw error
+          if (controlRunId) await runtimeBest(this.cfg.serverUrl, `/runs/${controlRunId}/finish`, this.token, {
+            status: 'skipped', summary: 'Cancelled by conversation pause', error: null,
+          })
+          // Do not ack any input from an interrupted shared turn. Other rooms
+          // remain unpaused and are re-read immediately on the next iteration.
+          activeBackgroundBrief = null
+          attemptedProjectScopes.clear()
+          this.pendingRerun = true
+          await this.postStatus(this.token, 'avail')
+          console.log(`[computer] ${this.agent.id} chat turn cancelled by conversation control`)
         } finally {
-          stopRunBeat()
-          if (typingTimer) clearInterval(typingTimer)
-          // Per-turn ledger drain (mirrors the agenda finally above).
-          this.currentRunId = null
-          if (convo) {
-            await runtimeBest(this.cfg.serverUrl, '/typing', token, { conversationId: convo, done: true })
+          // A model can finish while an IPC call is still queued or awaiting a
+          // token. Never let that work inherit a later turn's control context.
+          if (this.cliBroker) {
+            this.cliBrokerNeedsRestart = true
+            await this.cliBroker.stop()
           }
-          // Release EVERY room this turn claimed. The indicator room is the one
-          // the human sees, but the claim — and the per-turn HELD count cleared
-          // alongside it — belongs to all of them.
-          if (thinkingIds.length > 0) {
-            await runtimeBest(this.cfg.serverUrl, '/thinking/unmark', token, { conversationIds: thinkingIds })
-          }
-          // Release the semaphore slot regardless of success / error — the
-          // next queued agent can now spawn. MUST be in the same finally
-          // that runs after the spawn await completes (success / error /
-          // abort), otherwise a stuck slot starves the whole computer.
-          bigBrainSem.release()
+          this.chatTurnSignal = null
+          this.conversationControl.finish()
+          // Confirmation happens only after engine + triage + semaphore cleanup.
+          await this.refreshConversationControls()
         }
-        // Rate-limit case: when the underlying provider (Anthropic / OpenAI)
-        // throttles us, this is NOT an agent-visible failure — the unread
-        // survives (we skip ackSeen below for any engineError), the next wake
-        // re-attempts, and jitter above plus this skip-the-notice keeps the
-        // user from seeing a row of "byoa_engine_failed" markers in chat for
-        // what is really a transient provider throttle. Persist a quieter
-        // signal to the run row instead so it shows up in observability.
-        const outcome = classifyTurnOutcome(engineError)
-        const rateLimited = outcome === 'rate-limited'
-        // An engine nobody has logged into will fail the same way on the next
-        // poll, and the one after that. Cool down like a rate limit so the
-        // machine stops spinning, but tell the user — a silent backoff on a
-        // fixable problem is just a slower way of never working.
-        if (outcome === 'operator-fix') {
-          console.warn(`[computer] ${this.agent.id} engine needs operator action — pausing ${Math.round(ENGINE_BACKOFF_AFTER_OPERATOR_FIX_MS / 60000)}min: ${engineError?.slice(0, 160)}`)
-        }
-        if (engineError && !rateLimited) {
-          await this.publishEngineFailure({
-            token,
-            runId: run?.runId,
-            conversationId: convo,
-            error: engineError,
-            exitCode,
-          })
-        }
-        if (engineError && rateLimited) {
-          // ENTER cooldown: this agent skips its own turns for the
-          // configured window. The unread is kept (no ack, see below);
-          // the next wake AFTER the cooldown will pick it up cleanly.
-          // Also clear pendingRerun so the do-while loop exits — there's
-          // no point in immediately re-attempting against the same throttle.
-          // ALSO tell the global adaptive pacer to slow down — multiple
-          // agents hitting rate-limit means the current interval is too
-          // aggressive for the account's actual burst quota.
-          this.pendingRerun = false
-          spawnPacer.onRateLimited()
-          console.warn(`[computer] ${this.agent.id} engine RATE-LIMITED (sem queue depth was ${semQueueDepth}) — cooling down ${Math.round(ENGINE_BACKOFF_AFTER_RATE_LIMIT_MS / 1000)}s, pacer now ${spawnPacer.intervalMs}ms`)
-        } else if (outcome === 'ok') {
-          // Clean turn → signal the pacer; the backoff itself is cleared below.
-          spawnPacer.onOk()
-        }
-        this.applyTurnBackoff(outcome)
-        if (run?.runId) {
-          await runtimeBest(this.cfg.serverUrl, `/runs/${run.runId}/finish`, token, {
-            status: exitCode === 0 ? 'completed' : 'failed',
-            summary: rateLimited ? `rate-limited (deferred for retry)` : (engineError ?? `byoa ${this.adapter.id} run (exit ${exitCode})`),
-            error: rateLimited ? null : engineError,
-            model: turnModel ?? this.agent.model,
-            usage: turnUsage ? usageFromClaude(turnUsage) : null,
-          })
-        }
-        if (engineError && activeBackgroundBrief) {
-          this.queueBackgroundBrief(activeBackgroundBrief, activeBriefConversation)
-          this.pendingRerun = false
-        }
-        activeBackgroundBrief = null
-        // Clean turn → ack everything this turn saw. If the engine replied it
-        // already advanced these cursors (monotonic ack is a no-op then); if it
-        // read the room and chose silence, this is what stops the same inbox
-        // from re-waking the big brain on the next drain. On engine FAILURE we
-        // skip the ack so the unread survives for a retry / next wake.
-        if (!engineError) await this.ackSeen(token, seen)
-        await this.postStatus(token, 'avail')
-        // A chat turn resets the "quiet" anchor: an agent that just acted in chat
-        // isn't immediately pulled into an agenda turn (mirrors the cloud idle
-        // scheduler only picking agents quiet for N minutes).
-        this.lastTurnEndedAt = Date.now()
-        console.log(`[computer] ${this.agent.id} turn DONE (${reason}) — total ${Date.now() - turnStart}ms, exit ${exitCode}${this.pendingRerun ? ' · rerun queued' : ''}`)
-        reason = 'rerun (coalesced wake)'
       } while (this.pendingRerun && !this.stopped)
     } catch (err) {
       if (activeBackgroundBrief) {
@@ -4289,7 +4396,9 @@ async function doRun(serverOverride?: string): Promise<void> {
             continue
           }
           const signal = event.data ? parseComputerControlEvent(event.data) : null
-          if (signal?.kind === 'engine.detect') void rescanEngines(true)
+          if (signal?.kind === 'conversation.control') {
+            for (const runner of runners.values()) void runner.refreshConversationControls().catch(() => {})
+          } else if (signal?.kind === 'engine.detect') void rescanEngines(true)
           else if (signal?.kind === 'engine.update') void updateEngine(signal.engine, signal.id)
           else if (signal?.kind === 'security.mode') {
             cfg.unsandboxed = signal.unsandboxed

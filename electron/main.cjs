@@ -1543,12 +1543,12 @@ ipcMain.handle('auth:arm', () => armAuthHandoff())
 // NOTIFICATION window asks main to focus a conversation when user clicks
 // a toast. Bring the main window forward + forward the id over to its
 // renderer so the React app selects the conversation.
-ipcMain.on('notification:focus-convo', (_event, conversationId) => {
+ipcMain.on('notification:focus-convo', (_event, conversationId, companyId) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
-    mainWindow.webContents.send('notification:focus-convo', conversationId)
+    mainWindow.webContents.send('notification:focus-convo', conversationId, companyId)
   }
 })
 

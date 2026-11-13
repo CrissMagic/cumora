@@ -1,3 +1,4 @@
+import { recordWorkspaceView, removeWorkspaceView } from './workspace-presence.js'
 import { WebSocketServer, type WebSocket } from 'ws'
 import type { Server } from 'node:http'
 import {
@@ -34,6 +35,9 @@ interface AuthedSocket {
    *  Fan-out does not consult this set: delivery is by user id, and one
    *  socket receives frames for every workspace that user belongs to. */
   companies: Set<string>
+  viewCompanyId?: string
+  viewQueue?: Promise<void>
+  pendingView?: { companyId: string; active: boolean }
   /** Active doc subscriptions on this socket. Released on close. */
   docSubs: Map<string, DocSubscriber>
   /** Document protocol frames are handled FIFO per socket. This keeps an
@@ -261,6 +265,11 @@ export async function resolveWsEventRecipientUserIds(
          JOIN company_members company_member
            ON company_member.user_id = p.id
           AND company_member.company_id = c.company_id
+        WHERE ($4::boolean OR NOT EXISTS (
+          SELECT 1 FROM conversation_mutes mute
+           WHERE mute.conversation_id = c.id AND mute.user_id = p.id
+             AND (mute.muted_until IS NULL OR mute.muted_until > NOW())
+        ))
      ), durable_recipient AS (
        SELECT cm.user_id
          FROM scoped_conversation c
@@ -282,9 +291,12 @@ export async function resolveWsEventRecipientUserIds(
      SELECT user_id FROM current_members
      UNION
      SELECT user_id FROM durable_recipient`,
-    [conversationId, companyId, durableMessageId],
+    [conversationId, companyId, durableMessageId, event.type !== 'message.notification'],
   )
-  return new Set(rows.map((row) => row.user_id))
+  const recipients = rows.map((row) => row.user_id)
+  const requested = new Set(event.recipientUserIds ?? [])
+  return new Set(event.type === 'message.notification'
+    ? recipients.filter((id) => requested.has(id)) : recipients)
 }
 
 /** Look up a doc + verify the caller's tenant membership in one shot.
@@ -1268,6 +1280,9 @@ export function attachWebSocket(httpServer: Server) {
       if (released) return
       released = true
       c.closed = true
+      void (c.viewQueue ?? Promise.resolve()).then(async () => {
+        if (c.viewCompanyId) await removeWorkspaceView(c.userId, c.viewCompanyId, c.originId)
+      }).catch((error) => console.warn('[ws] view cleanup failed', error))
       removeQueuedDocItems(c)
       for (const [docId, subRec] of c.docSubs) {
         docUnsubscribe(docId, subRec)
@@ -1318,6 +1333,31 @@ export function attachWebSocket(httpServer: Server) {
       let msg: Record<string, unknown>
       try { msg = JSON.parse(raw.toString()) as Record<string, unknown> } catch { return }
       const type = typeof msg.type === 'string' ? msg.type : ''
+      if (type === 'workspace.view') {
+        const companyId = typeof msg.companyId === 'string' ? msg.companyId : ''
+        const active = msg.active === true
+        if (companyId.length > 200) return
+        c.pendingView = { companyId, active }
+        if (c.viewQueue) return
+        c.viewQueue = (async () => {
+          while (c.pendingView && !c.closed) {
+            const { companyId, active } = c.pendingView
+            c.pendingView = undefined
+            if (c.viewCompanyId && (c.viewCompanyId !== companyId || !active)) {
+              await removeWorkspaceView(c.userId, c.viewCompanyId, c.originId)
+              c.viewCompanyId = undefined
+            }
+            if (!active || !companyId) continue
+            const member = await pool.query('SELECT 1 FROM company_members WHERE user_id = $1 AND company_id = $2', [c.userId, companyId])
+            if (!member.rowCount || c.closed) continue
+            c.viewCompanyId = companyId
+            await recordWorkspaceView(c.userId, companyId, c.originId)
+            if (c.closed) await removeWorkspaceView(c.userId, companyId, c.originId)
+          }
+        })().catch((error) => console.warn('[ws] workspace view failed', error))
+          .finally(() => { c.viewQueue = undefined })
+        return
+      }
       if (type.startsWith('doc.')) {
         enqueueInboundDocFrame(msg, Buffer.byteLength(raw.toString()))
       }

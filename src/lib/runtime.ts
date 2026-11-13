@@ -9,6 +9,7 @@ export interface NotificationPushPayload {
    *  re-pushes, but `messageId` is the actual identity. */
   messageId: string
   conversationId: string
+  companyId?: string
   authorId: string
   authorName: string
   authorAvatarUrl?: string | null
@@ -54,7 +55,7 @@ interface CumoraBridge {
     /** Main / notification → notification window: remove a toast id. */
     dismiss: (id: string) => void
     /** Notification → main: bring main window forward + select convo. */
-    focusConvo: (conversationId: string) => void
+    focusConvo: (conversationId: string, companyId?: string) => void
     /** Notification → main: renderer is mounted; flush queued pushes. */
     ready: () => void
     /** Notification → main: first toast painted, OK to show the window. */
@@ -73,7 +74,7 @@ interface CumoraBridge {
     /** Notification window subscribes — fires on each push from main. */
     onPush: (handler: (p: NotificationPushPayload) => void) => () => void
     /** Main window subscribes — fires when notif window asks to focus a convo. */
-    onFocusConvo: (handler: (conversationId: string) => void) => () => void
+    onFocusConvo: (handler: (conversationId: string, companyId?: string) => void) => () => void
   }
   /** OAuth loopback bridge. Main process opens the user's system
    *  browser via openExternal(); after the provider chain, our local

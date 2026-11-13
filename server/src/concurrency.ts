@@ -33,12 +33,25 @@ export class Semaphore {
   }
 
   /** Wait for a permit. Resolves once one is available. */
-  acquire(): Promise<void> {
+  acquire(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
     if (this.permits > 0) {
       this.permits--
       return Promise.resolve()
     }
-    return new Promise<void>((resolve) => this.waiters.push(resolve))
+    return new Promise<void>((resolve, reject) => {
+      const grant = () => {
+        signal?.removeEventListener('abort', cancel)
+        resolve()
+      }
+      const cancel = () => {
+        const index = this.waiters.indexOf(grant)
+        if (index >= 0) this.waiters.splice(index, 1)
+        reject(signal?.reason)
+      }
+      this.waiters.push(grant)
+      signal?.addEventListener('abort', cancel, { once: true })
+    })
   }
 
   /** Return a permit. Hands it directly to the next waiter (if any)

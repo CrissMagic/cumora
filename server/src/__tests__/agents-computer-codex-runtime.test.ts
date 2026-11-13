@@ -573,6 +573,7 @@ test('daemon migrates automatically, isolates failures, deduplicates retries and
     let notices = 0
     let noticeAttempts = 0
     let blockedTokens = 0
+    let healthyControls = 0
     let pendingConversation = 'fixture-conversation'
     const interval = globalThis.setInterval
     globalThis.setInterval = (fn, ms, ...args) => interval(fn, ms === 60_000 ? 40 : ms, ...args)
@@ -587,6 +588,10 @@ test('daemon migrates automatically, isolates failures, deduplicates retries and
       if (path.endsWith('/runtime-token')) {
         if (path.split('/')[3] === 'blocked') blockedTokens++
         return Response.json({ token: path.split('/')[3], expiresInSeconds: 3600 })
+      }
+      if (path === '/runtime/conversation-controls') {
+        if (options.headers.Authorization === 'Bearer healthy' && ++healthyControls === 1) return new Response('', { status: 503 })
+        return Response.json([])
       }
       if (path === '/runtime/inbox') return Response.json({ rows: [{ conversation_id: pendingConversation }] })
       if (path === '/runtime/notices') {
@@ -612,7 +617,7 @@ test('daemon migrates automatically, isolates failures, deduplicates retries and
       }
     }
     await runComputerDaemon([])
-    await waitFor(() => scans >= 4 && connected.has('healthy') && connected.has('new-user'))
+    await waitFor(() => scans >= 4 && connected.has('healthy') && connected.has('new-user') && healthyControls >= 2)
     if (${recover}) {
       assert.equal(connected.has('blocked'), false)
       assert.equal(errors.filter(line => line.includes('blocked paused:')).length, 1)

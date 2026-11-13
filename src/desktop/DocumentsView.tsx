@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { useDocuments } from '@/stores/documents'
-import { DocumentEditor } from '@/components/DocumentEditor'
+import { LazyDocumentEditor as DocumentEditor } from '@/components/LazyDocumentEditor'
 import { useAuth } from '@/stores/auth'
 import { useParticipants } from '@/stores/participants'
 import { useT } from '@/lib/i18n'

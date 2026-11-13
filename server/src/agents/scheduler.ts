@@ -20,6 +20,7 @@
  * server doesn't track Pod lifetimes — the next wake re-creates the
  * Pod via the orchestrator.
  */
+import { conversationAgentsPaused } from './conversation-control.js'
 import { pool } from '../db/pool.js'
 import { env } from '../env.js'
 import { CH_MESSAGE_NEW, CH_POLLS, CH_TYPING, publish, redis, sub, type MessageNewEvent, type PollUpdatedEvent } from '../redis.js'
@@ -440,6 +441,8 @@ async function wakeOne(
   options: WakeOptions = {},
   retryAttempt: number = 0,
 ): Promise<boolean> {
+  // Durable pause wins over new messages, retries and synthetic wakes alike.
+  if (conversationId && await conversationAgentsPaused(conversationId)) return false
   // Synthetic wakes can be dropped under load — the next idle tick
   // or next scanner pass will re-evaluate. Real wakes never are.
   if ((reason === 'idle' || reason === 'background_scan') && !_consumeLowPriorityWakeBudget()) {
@@ -822,7 +825,7 @@ async function wake(payload: MessageNewEvent): Promise<void> {
                  AND (mu.muted_until IS NULL OR mu.muted_until > NOW())
             ), ARRAY[]::text[]) AS muted_agent_ids
        FROM conversations c
-      WHERE c.id = $1`,
+      WHERE c.id = $1 AND NOT c.agents_paused`,
     [conversationId],
   )
   const conversation = convoRows[0]

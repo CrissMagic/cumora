@@ -1,3 +1,4 @@
+import { isWindowAttentive, subscribeWindowAttention } from '@/lib/windowAttention'
 import { getActiveCompanyId, getAuthToken, useAuth } from '@/stores/auth'
 import { isElectron } from '@/lib/runtime'
 import { needsServerAddress, resolveServerAddress, saveServerAddress, SERVER_ADDRESS_KEY } from '@/lib/server-address'
@@ -136,6 +137,13 @@ export interface ApiMessage extends Message {
   /** Older reads and WS frames still carry the singular column value. */
   attachments?: readonly AttachmentDescriptor[]
   reactions?: Array<{ emoji: string; count: number; mine?: boolean; users?: string[] }>
+}
+
+export interface ConversationAgentControlState {
+  paused: boolean
+  revision: number
+  supported: boolean
+  agents: Array<{ id: string; name: string; supported: boolean; confirmed: boolean }>
 }
 
 export interface ApiConversation {
@@ -1070,6 +1078,8 @@ export const api = {
   generateAgentAvatar: (id: string) =>
     http<{ url: string }>(`/agents/${encodeURIComponent(id)}/avatar/generate`, { method: 'POST' }),
   getConversations: () => http<ApiConversation[]>('/conversations'),
+  conversationAgentControl: (id: string) => http<ConversationAgentControlState>(`/conversations/${encodeURIComponent(id)}/agent-control`),
+  setConversationAgentControl: (id: string, paused: boolean) => http<ConversationAgentControlState>(`/conversations/${encodeURIComponent(id)}/agent-control`, { method: 'PUT', body: JSON.stringify({ paused }) }),
   createGroup: (input: { title: string; members: string[]; subtitle?: string; projectId?: string | null }) =>
     http<{ id: string; members: string[]; projectId: string | null }>('/conversations', {
       method: 'POST',
@@ -1563,7 +1573,8 @@ export interface CalendarEventInput {
 
 export type WsEvent =
   | { type: 'hello'; instanceId: string; ts: number }
-  | { type: 'message.new'; conversationId: string; message: ApiMessage }
+  | { type: 'message.notification'; companyId: string; conversationId: string; conversationTitle: string; authorName: string; recipientUserIds: string[]; message: { id: string; authorId: string; kind: string; body: string } }
+  | { type: 'message.new'; companyId?: string; conversationId: string; message: ApiMessage }
   | { type: 'message.delta'; conversationId: string; messageId: string; authorId: string; delta: string; sequence: number; done: boolean }
   | { type: 'typing'; conversationId: string; agentId: string; done: boolean }
   | { type: 'participants.status'; participantId: string; status: Status; statusUpdatedAt?: string }
@@ -1687,14 +1698,38 @@ class WsClient {
     const url = `${wsOrigin()}/ws?t=${encodeURIComponent(ticket)}`
     const sock = new WebSocket(url)
     this.ws = sock
-    sock.onopen = () => { this.reconnectDelay = 500 }
+    let ready = false
+    const reportView = () => {
+      if (ready && this.ws === sock && sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'workspace.view', companyId: getActiveCompanyId(), active: isWindowAttentive() }))
+      }
+    }
+    let viewTimer: ReturnType<typeof setInterval> | undefined
+    let offAttention: (() => void) | undefined
+    sock.onopen = () => {
+      this.reconnectDelay = 500
+    }
     sock.onmessage = (ev) => {
+      if (this.ws !== sock) return
       try {
         const data = JSON.parse(ev.data) as WsEvent
+        if (data.type === 'hello') {
+          // The server installs its inbound handler only after ticket and
+          // membership lookup. onopen is earlier and can lose this frame.
+          if (!ready) {
+            ready = true
+            viewTimer = setInterval(reportView, 20_000)
+            offAttention = subscribeWindowAttention(reportView)
+          }
+          reportView()
+        }
         this.listeners.forEach((l) => { l(data) })
       } catch { /* ignore */ }
     }
     sock.onclose = () => {
+      ready = false
+      clearInterval(viewTimer)
+      offAttention?.()
       // Only the socket that is still CURRENT may clear the field. `reconnect()`
       // closes the old socket and opens its replacement immediately, but the
       // close event lands a tick later — nulling `this.ws` then would orphan a

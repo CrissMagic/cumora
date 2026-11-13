@@ -21,6 +21,7 @@
 import { json, type NextFunction, type Request, type Response, Router } from 'express'
 import { publicBodyParserError } from '../../body-parser-errors.js'
 import { AGENDA_CLASSIFIER_ERROR, claimStallNudge, classifyAgendaActionable, gatherAgentAgenda, renderAgendaBrief } from '../agenda.js'
+import { conversationReplyRevisions, loadConversationControls } from '../conversation-control.js'
 import { runCli } from '../cli.js'
 import { buildTriageRequest, gatherClaimsByConvo } from '../inbox-triage.js'
 import { agentProjectWorkspaces } from '../../project-workspaces.js'
@@ -176,7 +177,7 @@ attachFsEndpoints(runtimeRouter, withAgent)
 // and inject the token's pinned agentId so a compromised pod can't
 // impersonate another agent.
 runtimeRouter.post('/cli', withAgent(async (c, req, res) => {
-  const body = req.body as { argv?: unknown } | undefined
+  const body = req.body as { argv?: unknown; conversationRevisions?: unknown } | undefined
   const argv = Array.isArray(body?.argv) ? body!.argv.filter((x): x is string => typeof x === 'string') : null
   if (!argv) { res.status(400).json({ error: 'argv (string[]) required' }); return }
 
@@ -184,7 +185,14 @@ runtimeRouter.post('/cli', withAgent(async (c, req, res) => {
   // identity, and we prepend `--as <jwt.sub>` so runCli resolves to the
   // pinned agent. Implementation lives in cli-argv.ts so the strip
   // rules can be unit-tested in isolation.
-  const result = await runCli(buildRuntimeArgv(c.sub, argv))
+  const revisions = body?.conversationRevisions
+  if (revisions !== undefined && (!isPlainRecord(revisions)
+    || Object.values(revisions).some((v) => !Number.isInteger(v) || (v as number) < 0 || (v as number) > MAX_PG_INTEGER))) {
+    res.status(400).json({ error: 'invalid conversation revisions' }); return
+  }
+  const invoke = () => runCli(buildRuntimeArgv(c.sub, argv))
+  const result = revisions === undefined ? await invoke()
+    : await conversationReplyRevisions.run(revisions as Record<string, number>, invoke)
   res.json({
     text: result.text,
     exitCode: result.exitCode,
@@ -192,6 +200,34 @@ runtimeRouter.post('/cli', withAgent(async (c, req, res) => {
     sideEffects: result.sideEffects ?? [],
     attachmentReads: result.attachmentReads ?? [],
   })
+}))
+
+// Controls are read even while a turn is busy, independently of inbox polling.
+runtimeRouter.get('/conversation-controls', withAgent(async (c, _req, res) => {
+  res.json(await loadConversationControls(c.sub, c.companyId))
+}))
+runtimeRouter.post('/conversation-controls/ack', withAgent(async (c, req, res) => {
+  const { conversationId, revision } = req.body ?? {}
+  if (typeof conversationId !== 'string' || !Number.isInteger(revision) || revision < 0 || revision > MAX_PG_INTEGER) {
+    res.status(400).json({ error: 'conversationId and revision required' }); return
+  }
+  // JWT identity, live membership, assignment and current generation all
+  // participate in the same SQL mutation; stale acks never confirm a new stop.
+  await withRuntimeAgentRunAuthorization({ agentId: c.sub, companyId: c.companyId, runIds: [], task: async (client) => {
+    await client.query('SELECT id FROM conversations WHERE id = $1 AND company_id = $2 FOR SHARE', [conversationId, c.companyId])
+    await client.query(
+      `INSERT INTO conversation_agent_control_acks (conversation_id, agent_id, company_id, assignment_id, revision)
+       SELECT cv.id, p.id, p.company_id, p.runtime_assignment_id, cv.agent_control_revision
+         FROM conversations cv JOIN conversation_members cm ON cm.conversation_id = cv.id AND cm.company_id = cv.company_id
+         JOIN participants p ON p.id = cm.participant_id AND p.company_id = cm.company_id
+        WHERE cv.id = $1 AND cv.company_id = $2 AND p.id = $3 AND p.runtime_assignment_id = $4
+          AND cv.agents_paused AND cv.agent_control_revision = $5 AND p.departed_at IS NULL
+       ON CONFLICT (conversation_id, agent_id) DO UPDATE
+         SET revision = EXCLUDED.revision, assignment_id = EXCLUDED.assignment_id, acknowledged_at = NOW()`,
+      [conversationId, c.companyId, c.sub, c.assignmentId, revision],
+    )
+  } })
+  res.json({ ok: true })
 }))
 
 // ─── reads ──────────────────────────────────────────────────────────
@@ -940,21 +976,30 @@ runtimeRouter.get('/worklog/peek', withAgent(async (c, req, res) => {
 // a mid-turn steer drain, so the next wake's loadInbox doesn't surface
 // them again. agentId from JWT (c.sub).
 runtimeRouter.post('/conversation/mark-read', withAgent(async (c, req, res) => {
-  const body = req.body as { conversationId?: string; upToMessageId?: string } | undefined
+  const body = req.body as { conversationId?: string; upToMessageId?: string; conversationRevision?: number } | undefined
   if (!body?.conversationId || !body.upToMessageId) {
     res.status(400).json({ error: 'conversationId and upToMessageId required' }); return
+  }
+  if (body.conversationRevision !== undefined && (!Number.isInteger(body.conversationRevision) || body.conversationRevision < 0 || body.conversationRevision > MAX_PG_INTEGER)) {
+    res.status(400).json({ error: 'invalid conversation revision' }); return
   }
   const gate = await withRuntimeMessageReadAuthorization({
     agentId: c.sub,
     companyId: c.companyId,
     conversationId: body.conversationId,
     messageId: body.upToMessageId,
-    task: (client) => inprocClient.markConversationRead({
-      agentId: c.sub,
-      companyId: c.companyId,
-      conversationId: body.conversationId as string,
-      upToMessageId: body.upToMessageId as string,
-    }, client),
+    task: async (client) => {
+      if (body.conversationRevision !== undefined) {
+        const state = await client.query('SELECT agent_control_revision FROM conversations WHERE id = $1 AND company_id = $2', [body.conversationId, c.companyId])
+        if (state.rows[0]?.agent_control_revision !== body.conversationRevision) return
+      }
+      await inprocClient.markConversationRead({
+        agentId: c.sub,
+        companyId: c.companyId,
+        conversationId: body.conversationId as string,
+        upToMessageId: body.upToMessageId as string,
+      }, client)
+    },
   })
   if (!gate.authorized) { res.status(403).json({ error: 'message is not readable in that conversation' }); return }
   res.json({ ok: true })

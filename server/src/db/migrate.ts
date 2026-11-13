@@ -56,6 +56,7 @@ import { AGENT_NATIVE_FAST_MODE_SQL, agentNativeFastModeChecksum } from './migra
 import { MESSAGE_ATTACHMENTS_SQL, messageAttachmentsChecksum } from './migrations/0012-message-attachments.js'
 import { ATTACHMENT_GRANTS_SQL, attachmentGrantsChecksum } from './migrations/0013-attachment-grants.js'
 import { COMPUTER_UNSANDBOXED_MODE_SQL, computerUnsandboxedModeChecksum } from './migrations/0014-computer-unsandboxed-mode.js'
+import { CONVERSATION_AGENT_CONTROL_SQL, conversationAgentControlChecksum } from './migrations/0016-conversation-agent-control.js'
 import { PROJECT_WORKSPACES_SQL, projectWorkspacesChecksum } from './migrations/0015-project-workspaces.js'
 
 /** Frozen data backfill embedded in migration 0001. Exported so its behavior
@@ -2669,6 +2670,12 @@ const VERSIONED_MIGRATIONS: readonly VersionedMigration[] = [
     sourceChecksum: projectWorkspacesChecksum(),
     transactional: true,
     up: async (client) => { await client.query(PROJECT_WORKSPACES_SQL) },
+  },
+  {
+    ...SCHEMA_MIGRATIONS[15],
+    sourceChecksum: conversationAgentControlChecksum(),
+    transactional: true,
+    up: async (client) => { await client.query(CONVERSATION_AGENT_CONTROL_SQL) },
   },
 ]
 

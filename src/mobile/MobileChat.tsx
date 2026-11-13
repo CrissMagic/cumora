@@ -7,14 +7,14 @@ import { useApp } from '@/stores/app'
 import { useMe } from '@/stores/auth'
 import { useConversations, isMuted } from '@/stores/conversations'
 import { useParticipants } from '@/stores/participants'
-import { useMessages, sendUserMessage, messagesFor, toggleReaction, VIRTUOSO_FIRST_INDEX_BASE } from '@/stores/messages'
-import type { MessagesState } from '@/stores/messages'
+import { useMessages, sendUserMessage, createMessagesSelector, toggleReaction, VIRTUOSO_FIRST_INDEX_BASE } from '@/stores/messages'
 import { Avatar, AvatarStack } from '@/components/Avatar'
 import { MessageRow, TypingRow } from '@/components/Message'
 import { ComposerAttachments } from '@/components/ComposerAttachments'
 import { RichInput, type RichInputHandle } from '@/components/RichInput'
 import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
 import { IBack, IConvene, IMore, IClip, IAt, ISmile, ISend, ISearch } from '@/components/icons'
+import { ConversationAgentControl } from '@/components/ConversationAgentControl'
 import { api } from '@/api/client'
 import type { Message, Participant } from '@/types'
 import { cn } from '@/lib/utils'
@@ -44,10 +44,10 @@ export function MobileChat() {
   const pushStack = useApp((s) => s.pushMobileStack)
   const setView = useApp((s) => s.setView)
   const byConvo = useMessages((s) => (convoId ? s.byConvo[convoId] : undefined))
-  const streaming = useMessages((s) => s.streaming)
+  const selectMessages = useMemo(() => createMessagesSelector(convoId), [convoId])
+  const list = useMessages(selectMessages)
   const typingIds = useMessages((s) => (convoId ? s.typing[convoId] ?? null : null))
   const [menuOpen, setMenuOpen] = useState(false)
-  const [conveneStarting, setConveneStarting] = useState(false)
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [emojiTab, setEmojiTab] = useState<'std' | 'skype'>('std')
   // Older-history pager — virtualization handles the runtime cost of mounting
@@ -61,10 +61,6 @@ export function MobileChat() {
   // Virtuoso holds scroll position when older history pages in.
   const firstItemIndex = useMessages((s) => (convoId ? s.firstItemIndex[convoId] ?? VIRTUOSO_FIRST_INDEX_BASE : VIRTUOSO_FIRST_INDEX_BASE))
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
-  const list = useMemo(
-    () => messagesFor({ byConvo: byConvo ? { [convoId!]: byConvo } : {}, streaming } as MessagesState, convoId),
-    [byConvo, streaming, convoId],
-  )
   // Drives the bottom-right "scroll to latest" pill — true means we're pinned
   // at the bottom and the pill stays hidden. Note: there's also an existing
   // `scrollToLatest` (declared below) that snaps with `behavior:'auto'` for the
@@ -323,18 +319,7 @@ export function MobileChat() {
     .filter((n): n is string => Boolean(n))
   const muted = isMuted(c)
 
-  const onConvene = async () => {
-    if (!convoId || conveneStarting) return
-    setConveneStarting(true)
-    try {
-      await api.startConvene(convoId, c.title || t('convene.sessionTitleFallback'))
-      setView('convene')
-    } catch (err) {
-      console.warn('start convene failed', err)
-    } finally {
-      setConveneStarting(false)
-    }
-  }
+  const onConvene = () => setView('convene')
 
   const toggleMute = async () => {
     if (!convoId) return
@@ -590,9 +575,8 @@ export function MobileChat() {
           </Pressable>
           <Pressable
             onClick={onConvene}
-            disabled={conveneStarting}
             className="w-10 h-10 grid place-items-center text-ink-700 active:bg-sky2-50 rounded-full disabled:opacity-50"
-            aria-label={t('mobchat.startConvene')}
+            aria-label={`${t('mobchat.convene')} · ${t('chat.comingSoon')}`}
           >
             <IConvene className="w-[20px] h-[20px]" />
           </Pressable>
@@ -646,6 +630,7 @@ export function MobileChat() {
           </div>
         </div>
       </header>
+      <ConversationAgentControl key={convoId} conversationId={convoId} />
 
       {/* Stream — virtualized via react-virtuoso. Long conversations no
           longer mount every bubble at once; rows outside the viewport
@@ -1127,7 +1112,6 @@ export function MobileChatInfo() {
   const byId = useParticipants((s) => s.byId)
   const meId = useMe()
   const openAgentInfo = useApp((s) => s.openAgentInfo)
-  const [busy, setBusy] = useState(false)
   // Inline editors for the group's name + topic (groups only — a DM title is
   // derived from the other person and isn't user-editable). Plus a member
   // search filter. All declared before the early returns so the hook order
@@ -1167,15 +1151,7 @@ export function MobileChatInfo() {
     resting: t('info.statusResting'),
   }
 
-  const startConvene = async () => {
-    if (!convoId || busy) return
-    setBusy(true)
-    try {
-      await api.startConvene(convoId, c.title || 'live work session')
-      setView('convene')
-    } catch (err) { console.warn('start convene failed', err) }
-    setBusy(false)
-  }
+  const startConvene = () => setView('convene')
 
   const onToggleMute = async () => {
     if (!convoId) return
@@ -1340,11 +1316,10 @@ export function MobileChatInfo() {
         <button
           type="button"
           onClick={startConvene}
-          disabled={busy}
           className="py-3 px-4 rounded-xl text-white font-semibold text-[13px] active:opacity-80 transition disabled:opacity-50"
           style={{ background: 'var(--skype-ink)' }}
         >
-          {busy ? t('mobchat.starting') : t('mobchat.convene')}
+          {t('mobchat.convene')} · {t('chat.comingSoon')}
         </button>
         <button
           type="button"

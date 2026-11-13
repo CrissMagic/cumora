@@ -11,6 +11,11 @@ import { redis, sub as redisSub } from '../../redis.js'
 import { parseComputerControlEvent, type ComputerControlEvent } from './control-event.js'
 
 const CH_COMPUTER_CONTROL_PREFIX = 'cumora:computer-control:'
+
+export async function deliverConversationControl(computerId: string): Promise<number> {
+  const event: ComputerControlEvent = { kind: 'conversation.control', id: randomUUID(), at: Date.now() }
+  return redis.publish(CH_COMPUTER_CONTROL_PREFIX + computerId, JSON.stringify(event))
+}
 const SSE_MAX_BUFFERED_BYTES = 1 * 1024 * 1024
 
 interface Subscriber {

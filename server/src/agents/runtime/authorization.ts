@@ -179,7 +179,7 @@ export async function withRuntimeMessageReadAuthorization<T>(args: {
          FROM conversations c
          JOIN messages m
            ON m.id = $4 AND m.conversation_id = c.id AND m.company_id = c.company_id
-        WHERE c.id = $1 AND c.company_id = $2
+        WHERE c.id = $1 AND c.company_id = $2 AND NOT c.agents_paused
           AND (
             EXISTS (
               SELECT 1 FROM conversation_members cm

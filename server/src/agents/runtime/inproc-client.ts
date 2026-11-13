@@ -147,7 +147,7 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
     // was ~60% of its measured cost; a name lets each pooled connection keep
     // the parsed statement and plan across calls.
     const { rows } = await pool.query<InboxRow>({
-      name: 'runtime_load_inbox',
+      name: 'runtime_load_inbox_v16',
       text: `WITH requesting_agent AS MATERIALIZED (
          SELECT company_id
            FROM participants
@@ -173,7 +173,7 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
             AND current_membership.participant_id = $1
            LEFT JOIN conversation_reads cr ON cr.user_id = $1 AND cr.conversation_id = c.id
            LEFT JOIN projects pr ON pr.id = c.project_id
-          WHERE current_membership.participant_id IS NOT NULL
+          WHERE NOT c.agents_paused AND (current_membership.participant_id IS NOT NULL
              OR EXISTS (
                SELECT 1
                  FROM messages delivered
@@ -184,6 +184,7 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
                     COALESCE(cr.last_read_message_id, '')
                   )
              )
+          )
        )
        SELECT
           m.id, m.conversation_id, co.company_id,

@@ -16,6 +16,8 @@
  * future sends skip it. Active tokens get their `last_seen_at` bumped
  * on every successful send so we can later purge truly idle devices.
  */
+import { usersNotViewingWorkspace } from './workspace-presence.js'
+import { CH_MESSAGE_NEW, publish } from './redis.js'
 import { readFile } from 'node:fs/promises'
 import { createSign } from 'node:crypto'
 import { connect, type ClientHttp2Session } from 'node:http2'
@@ -344,7 +346,7 @@ export async function dispatchMessagePush(args: {
 }): Promise<void> {
   try {
     const [recipients, convoRow, authorRow] = await Promise.all([
-      computeMessageRecipients({ conversationId: args.conversationId, authorId: args.authorId }),
+      computeMessageRecipients({ conversationId: args.conversationId, authorId: args.authorId, includeViewing: true }),
       pool.query<{ title: string }>(
         `SELECT title FROM conversations WHERE id = $1`, [args.conversationId],
       ).then((r) => r.rows[0]),
@@ -357,6 +359,14 @@ export async function dispatchMessagePush(args: {
       ).then((r) => r.rows[0]),
     ])
     if (recipients.length === 0) return
+    await publish(CH_MESSAGE_NEW, {
+      type: 'message.notification', companyId: args.companyId,
+      conversationId: args.conversationId, conversationTitle: convoRow?.title ?? '',
+      authorName: authorRow?.name ?? args.authorId, recipientUserIds: recipients,
+      message: { id: args.messageId, authorId: args.authorId, kind: 'text', body: args.body },
+    }).catch((error) => console.warn('[push] live notification failed', error))
+    const pushRecipients = await usersNotViewingWorkspace(recipients, args.companyId)
+    if (!pushRecipients.length) return
     await notifyMessage({
       conversationId: args.conversationId,
       conversationTitle: convoRow?.title ?? null,
@@ -365,7 +375,7 @@ export async function dispatchMessagePush(args: {
       messageId: args.messageId,
       body: args.body,
       companyId: args.companyId,
-      recipientUserIds: recipients,
+      recipientUserIds: pushRecipients,
     })
   } catch (e) {
     console.warn('[push] dispatchMessagePush failed', e)
@@ -375,11 +385,14 @@ export async function dispatchMessagePush(args: {
 export async function computeMessageRecipients(args: {
   conversationId: string
   authorId: string
+  includeViewing?: boolean
 }): Promise<string[]> {
-  const { rows } = await pool.query<{ user_id: string }>(
-    `SELECT u.id AS user_id
+  const { rows } = await pool.query<{ user_id: string; company_id: string }>(
+    `SELECT u.id AS user_id, cm.company_id
        FROM conversation_members cm
-       JOIN users u ON u.id = cm.participant_id
+       JOIN users u ON u.id = cm.participant_id AND u.deleted_at IS NULL
+       JOIN company_members workspace_member ON workspace_member.company_id = cm.company_id AND workspace_member.user_id = u.id
+       JOIN participants human ON human.id = u.id AND human.company_id = cm.company_id AND human.kind = 'human' AND human.departed_at IS NULL
       WHERE cm.conversation_id = $1
         AND u.id <> $2
         AND NOT EXISTS (
@@ -388,15 +401,9 @@ export async function computeMessageRecipients(args: {
              AND m.user_id = u.id
              AND (m.muted_until IS NULL OR m.muted_until > NOW())
         )
-        -- Skip humans currently looking at the app. The 'avail' status is
-        -- our cross-replica online marker (WS connect flips it; the last
-        -- close flips back to 'resting'). NotificationToasts handles them.
-        AND NOT EXISTS (
-          SELECT 1 FROM participants p
-           WHERE p.id = u.id
-             AND p.status = 'avail'
-        )`,
+`,
     [args.conversationId, args.authorId],
   )
-  return rows.map((r) => r.user_id)
+  const ids = rows.map((r) => r.user_id)
+  return args.includeViewing || !rows.length ? ids : usersNotViewingWorkspace(ids, rows[0].company_id)
 }

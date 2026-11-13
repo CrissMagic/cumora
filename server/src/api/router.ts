@@ -9,6 +9,9 @@
  * references participants with `ON DELETE RESTRICT`.
  */
 import { Router, json, type Request, type Response, type NextFunction } from 'express'
+import { conversationControlStatus } from '../agents/conversation-control.js'
+import { deliverConversationControl } from '../agents/computer/control-bus.js'
+import { wakeAgent } from '../agents/scheduler.js'
 import { isProviderProfileId } from '../agents/computer/provider-profiles.js'
 import { InvalidModelIdError, parseModelId } from '../agents/computer/model-id.js'
 import type { PoolClient } from 'pg'
@@ -4084,6 +4087,35 @@ api.post('/conversations/:id/typing', async (req, res) => {
     const msg = e instanceof Error ? e.message : 'internal'
     res.status(status).json({ error: msg })
   }
+})
+
+api.get('/conversations/:id/agent-control', async (req, res) => {
+  const id = String(req.params.id)
+  const { companyId } = await requireConversationMember(req, id)
+  res.json(await conversationControlStatus(id, companyId))
+})
+
+api.put('/conversations/:id/agent-control', async (req, res) => {
+  const id = String(req.params.id)
+  const { userId, companyId } = await requireCompany(req)
+  if (typeof req.body?.paused !== 'boolean') throw new HttpError(400, 'paused must be a boolean')
+  const paused: boolean = req.body.paused
+  const result = await withLockedConversationMember({ userId, companyId, conversationId: id, work: async (client) => {
+    const state = await conversationControlStatus(id, companyId, client)
+    if (paused && !state.supported) throw new HttpError(409, 'Conversation pause requires agents assigned to local computers with the updated daemon')
+    if (state.paused !== paused) {
+      await client.query(`UPDATE conversations SET agents_paused = $2, agent_control_revision = agent_control_revision + 1 WHERE id = $1`, [id, paused])
+      await enqueueBroadcast(client, CH_CONVO_UPDATED, { type: 'conversation.updated', conversationId: id, companyId, patch: {} })
+    }
+    return conversationControlStatus(id, companyId, client)
+  } })
+  nudgeRealtimeOutbox()
+  // Durable state is already committed. A disconnected control channel must
+  // not turn a successful pause into an apparent API failure.
+  await Promise.allSettled([...new Set(result.agents.map((a) => a.computerId).filter((c): c is string => !!c))]
+    .map((computerId) => deliverConversationControl(computerId)))
+  if (!paused) await Promise.allSettled(result.agents.map((a) => wakeAgent(a.id, 'manual', id)))
+  res.json(result)
 })
 
 api.post('/conversations/:id/read', async (req, res) => {
