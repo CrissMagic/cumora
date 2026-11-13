@@ -683,6 +683,7 @@ test('Codex one-shot paths send prompts through stdin', async () => {
       OPENAI_API_KEY: 'must-not-reach-tools',
       CUMORA_AGENT_IPC_DIR: join(root, 'private-ipc'),
       CUMORA_AGENT_MCP_SHIM: mcpShim,
+      CUMORA_BYOA_COMPAT_ENGINES: 'deepseek',
     },
     model: 'test-model',
     fastModel: null,
@@ -697,7 +698,7 @@ test('Codex one-shot paths send prompts through stdin', async () => {
   assert.ok(runCapture.argv?.includes('shell_environment_policy.inherit="none"'))
   assert.equal(runCapture.argv?.some((arg) => arg.includes(`${join(root, 'private-ipc', 'requests')}"="write`)), false)
   assert.equal(runCapture.argv?.some((arg) => arg.includes(`${join(root, 'private-ipc', 'responses')}"="write`)), false)
-  assert.ok(runCapture.argv?.includes('web_search="disabled"'))
+  assert.ok(runCapture.argv?.includes('web_search="live"'))
   assert.ok(runCapture.argv?.includes('features.hooks=false'))
   // Assert the INTENT — this home is marked untrusted — not one spelling of it.
   // The dotted `projects."<home>".trust_level=…` form used to be here and had

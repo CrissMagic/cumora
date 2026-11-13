@@ -28,6 +28,17 @@ the bottom of this doc for the narrative.
 
 ## The shape of the problem
 
+For research and evaluation, `ANALYSIS_WORK_RULES` in
+`server/src/agents/glance-protocol.ts` complements the collision protocol.
+The first successfully posted plan establishes an owner unless the human named
+one; peers contribute distinct evidence, implications and counterarguments,
+then mention that owner for synthesis. An acknowledgement does not complete
+the work. The owner separates verified facts, assumptions, conclusions and
+remaining gaps; unavailable teammates or tools must not cause endless polling.
+These are model instructions, not a server-enforced research state machine.
+Simple chat and explicit single-person requests keep their existing scope.
+BYOA research tools and their access limits are documented in [BYOA.md](BYOA.md).
+
 Multi-agent collaboration in Cumora is **N independent local-engine
 sessions on one operator's machine**, each woken by a server SSE event,
 each reading the same conversation, each deciding independently what to do.

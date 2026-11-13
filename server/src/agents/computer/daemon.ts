@@ -30,7 +30,8 @@ import { promisify } from 'node:util'
 const execFileP = promisify(execFile)
 
 import { type TokenUsage, usageFromClaude } from '../cost.js'
-import { GLANCE_YIELD_RULES } from '../glance-protocol.js'
+import { ANALYSIS_WORK_RULES, GLANCE_YIELD_RULES } from '../glance-protocol.js'
+import { researchCommand } from './research.js'
 import {
   composeMemoryDigest,
   conversationHeader,
@@ -51,7 +52,7 @@ import {
 import { SKYPE_EMOTICONS_GUIDE } from '../skype-emoticons.js'
 import { finalizeTriage, isRateLimited, parseTriage } from '../triage-core.js'
 import { type ActionSurface, actionSurfaceFor, actionSurfaceText, calendarExampleText, postingMechanicsText } from './prompt-surface.js'
-import { allowUnsandboxedByoa, classifyEngineFailure, detectEnginesWithStatus, ENGINE_IDS, engineFailureOf, engineVisionCapability, type DetectedEngineSnapshot, type EngineHopReport, type EngineId, type EngineRunResult, type EngineSession, type EngineUsage, enrichDetectedEngines, evaluateRunnableEngines, getAdapter, loginCodexRuntime, runEngineDoctor, type RunnableEngineEvaluation, snapshotDetectedEngines } from './engine.js'
+import { allowUnsandboxedByoa, compatibilityEngineIds, engineUsesCompatibilityMode, classifyEngineFailure, detectEnginesWithStatus, ENGINE_IDS, engineFailureOf, engineVisionCapability, type DetectedEngineSnapshot, type EngineHopReport, type EngineId, type EngineRunResult, type EngineSession, type EngineUsage, enrichDetectedEngines, evaluateRunnableEngines, getAdapter, loginCodexRuntime, runEngineDoctor, type RunnableEngineEvaluation, snapshotDetectedEngines } from './engine.js'
 import { EngineSessionStore, sessionIdPreview } from './session-store.js'
 import { CODEX_LOGIN_COMMAND, CODEX_MIGRATE_COMMAND, CODEX_SESSION_SCOPE, codexRuntimeHome } from './codex-runtime.js'
 import { cachedCodexProvider } from './codex-provider.js'
@@ -1477,7 +1478,7 @@ function handle(msg) {
   if (msg.method === 'tools/list' && msg.id !== undefined) {
     send(msg.id, { tools: [{
       name: 'cli',
-      description: 'Act in Cumora. Pass command-line words as argv; put message bodies directly in argv and never use local file paths.',
+      description: 'Act in Cumora. Pass command-line words as argv; put message bodies directly in argv and never use local file paths. Public research: ["research","search","public query"] or ["research","read","https://primary-source-page"]. Never put secrets in search queries.',
       inputSchema: {
         type: 'object',
         properties: { argv: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 2000 } },
@@ -2356,7 +2357,7 @@ export class AgentRunner {
 
   async start(): Promise<void> {
     await this.adapter.seedHome(this.home, { id: this.agent.id, name: this.agent.name, role: this.agent.role, systemPrompt: this.agent.systemPrompt })
-    if (allowUnsandboxedByoa()) await writeShim(this.binDir)
+    if (engineUsesCompatibilityMode(this.engine)) await writeShim(this.binDir)
     await writeShim(this.trustedCliDir)
     // Versions before the broker stored a live bearer token beside the shim.
     // Remove it before any new engine process can inspect the old home.
@@ -2483,6 +2484,9 @@ export class AgentRunner {
    *  only argv strings; identity, URL, Authorization, redirects, and token
    *  refresh remain daemon-owned and cannot be changed by the model. */
   private async invokeRuntimeCli(argv: string[], lifecycleSignal: AbortSignal): Promise<RuntimeCliBrokerResult> {
+    if (lifecycleSignal.aborted) return { exitCode: 70, error: 'runtime IPC request cancelled' }
+    // A local read-only capability. It neither needs nor receives a runtime JWT.
+    if (argv[0] === 'research') return researchCommand(argv)
     const requestAbort = new AbortController()
     const timeout = setTimeout(() => requestAbort.abort(), HTTP_TIMEOUT_MS)
     const onLifecycleAbort = () => requestAbort.abort()
@@ -2566,7 +2570,7 @@ export class AgentRunner {
   private engineEnv(): NodeJS.ProcessEnv {
     const env = {
       ...process.env,
-      PATH: engineProcessPath(this.binDir),
+      PATH: engineProcessPath(this.binDir, process.env.PATH, engineUsesCompatibilityMode(this.engine)),
       CUMORA_AGENT_IPC_DIR: this.ipcDir,
       CUMORA_AGENT_MCP_SHIM: join(this.trustedCliDir, 'cumora-mcp'),
       CUMORA_AGENT_ID: this.agent.id,
@@ -3033,7 +3037,7 @@ export class AgentRunner {
    *  shared glance-yield protocol, exactly like the cloud pod-agent. */
   /** Which calling convention this agent's turns actually have. */
   private promptSurface(): ActionSurface {
-    return actionSurfaceFor(allowUnsandboxedByoa())
+    return actionSurfaceFor(engineUsesCompatibilityMode(this.engine))
   }
 
   private standingPrompt(): string {
@@ -3064,7 +3068,11 @@ export class AgentRunner {
       `optimistically; the server HOLDs you and shows the newer messages if a peer moved the room while you composed.\n` +
       // The shared glance-and-yield protocol — verbatim via the const so BYOA
       // coordinates identically to the cloud pod-agent.
-      GLANCE_YIELD_RULES + `\n\n` +
+      GLANCE_YIELD_RULES + `\n\n` + ANALYSIS_WORK_RULES + `\n\n` +
+      `Public web research: use the same Cumora action surface with argv ["research","search","public query"] ` +
+      `or ["research","read","https://primary-source-page"]. This is a local, read-only broker capability, ` +
+      `available even if your model provider has no built-in search. Never send secrets, private files or whole chats as queries. ` +
+      `Search results are leads: read primary pages before treating claims as verified. If access fails, state the limitation.\n\n` +
       postingMechanicsText(this.promptSurface(), workspace ? join(this.home, 'notes') : undefined) +
       `After your work is complete and your final \`cumora reply\` returns success, end the turn. ` +
       `Do NOT restate it, summarise it, or narrate what you just did. ` +
@@ -3907,6 +3915,8 @@ async function doRun(serverOverride?: string): Promise<void> {
       if (process.env[name]) console.warn(`[computer] ignoring ${name}: custom engine argv requires CUMORA_BYOA_ALLOW_UNSANDBOXED=1`)
     }
   }
+  const compatibility = compatibilityEngineIds()
+  if (compatibility.length) console.warn(`[computer] local compatibility engines: ${compatibility.join(', ')} — host files and network enabled for these adapters only`)
   // Global safety net: a long-running daemon hosting every one of the user's
   // agents must NOT die because one async path threw — a transient 502 from a
   // server pod rolling, a network blip, a malformed event. Node ≥15 turns an
@@ -4444,11 +4454,13 @@ export function renderWindowsSupervisor(
   // _needsUnsandboxedOptIn. Dropping it makes the supervised daemon exit 70 on
   // every start, and this loop restarts it every 5 seconds forever.
   carryUnsandboxed = false,
+  compatibilityEngines = compatibilityEngineIds(),
 ): string {
   return [
     "$ErrorActionPreference = 'Continue'",
     "$env:CUMORA_SUPERVISED = '1'",
     ...(carryUnsandboxed ? ["$env:CUMORA_BYOA_ALLOW_UNSANDBOXED = '1'"] : []),
+    ...(compatibilityEngines.length ? [`$env:CUMORA_BYOA_COMPAT_ENGINES = ${quotePowerShell(compatibilityEngines.join(','))}`] : []),
     `$env:PATH = ${quotePowerShell(path)}`,
     '$utf8 = New-Object System.Text.UTF8Encoding($false)',
     `while (-not (Test-Path -LiteralPath ${quotePowerShell(disabledPath)})) {`,
@@ -4558,6 +4570,7 @@ async function installService(serverUrl: string): Promise<void> {
   const logPath = join(CONFIG_DIR, 'daemon.log')
   await mkdir(CONFIG_DIR, { recursive: true })
   const carryUnsandboxed = await _needsUnsandboxedOptIn()
+  const compatibility = compatibilityEngineIds().join(',')
   if (carryUnsandboxed) {
     console.warn('[computer] this machine has no secure engine, so the background service will')
     console.warn('[computer] carry CUMORA_BYOA_ALLOW_UNSANDBOXED=1 — without it the service exits 70')
@@ -4581,7 +4594,7 @@ async function installService(serverUrl: string): Promise<void> {
   <key>StandardErrorPath</key><string>${logPath}</string>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>${process.env.PATH ?? ''}</string>
-    <key>CUMORA_SUPERVISED</key><string>1</string>${carryUnsandboxed ? '\n    <key>CUMORA_BYOA_ALLOW_UNSANDBOXED</key><string>1</string>' : ''}
+    <key>CUMORA_SUPERVISED</key><string>1</string>${carryUnsandboxed ? '\n    <key>CUMORA_BYOA_ALLOW_UNSANDBOXED</key><string>1</string>' : ''}${compatibility ? `\n    <key>CUMORA_BYOA_COMPAT_ENGINES</key><string>${compatibility}</string>` : ''}
   </dict>
 </dict></plist>
 `
@@ -4606,7 +4619,7 @@ ExecStart=${npx} -y cumora@latest agent computer --server ${serverUrl}
 Restart=always
 RestartSec=5
 Environment=PATH=${process.env.PATH ?? ''}
-Environment=CUMORA_SUPERVISED=1${carryUnsandboxed ? '\nEnvironment=CUMORA_BYOA_ALLOW_UNSANDBOXED=1' : ''}
+Environment=CUMORA_SUPERVISED=1${carryUnsandboxed ? '\nEnvironment=CUMORA_BYOA_ALLOW_UNSANDBOXED=1' : ''}${compatibility ? `\nEnvironment=CUMORA_BYOA_COMPAT_ENGINES=${compatibility}` : ''}
 
 [Install]
 WantedBy=default.target

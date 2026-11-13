@@ -15,6 +15,7 @@ import { useT } from '@/lib/i18n'
 import { catalogTrust } from '@/lib/engine-model-choices'
 import { fastModeAvailable } from '@/lib/agent-fast-mode'
 import { engineLabel } from '@/lib/engines'
+import { agentEngineChoices } from '@/lib/agent-engine-choices'
 
 const INHERIT_ENGINE = '__inherit__'
 
@@ -65,6 +66,8 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
   const [fastModel, setFastModel] = useState(agent?.fastModel ?? '')
   const [nativeFastMode, setNativeFastMode] = useState(agent?.nativeFastMode ?? false)
   const [busy, setBusy] = useState(false)
+  const [detecting, setDetecting] = useState(false)
+  const detectGeneration = useRef(0)
   const [err, setErr] = useState<string | null>(null)
   const [avatarUrl, setAvatarUrl] = useState<string | null>(agent?.avatarUrl ?? null)
   const [generatingAvatar, setGeneratingAvatar] = useState(false)
@@ -94,10 +97,13 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
   const engineTouched = useRef(false)
   const selectedComputer = computerId ? computersById[computerId] : undefined
   const isByoa = !!selectedComputer && selectedComputer.kind !== 'cloud'
+  const engineUnavailable = isByoa && !selectedComputer.availableEngines.includes(
+    (engineChoice === INHERIT_ENGINE ? selectedComputer.availableEngines[0] : engineChoice) as EngineId,
+  )
   const selectedEngineId: EngineId = (
     engineChoice !== INHERIT_ENGINE
       ? engineChoice
-      : (selectedComputer?.availableEngines[0] ?? 'claude')
+      : (selectedComputer?.availableEngines[0] ?? 'managed')
   ) as EngineId
   const selectedComputerOffline = isByoa && selectedComputer.status !== 'online'
   const detectedEngine = selectedComputer?.detectedEngines?.find((engine) => engine.id === selectedEngineId)
@@ -181,6 +187,36 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
 
   useEffect(() => { void useComputers.getState().refresh() }, [])
   useEffect(() => {
+    detectGeneration.current += 1
+    setDetecting(false)
+    return () => { detectGeneration.current += 1 }
+  }, [computerId])
+
+  const refreshEngines = async () => {
+    if (!selectedComputer || detecting) return
+    const generation = ++detectGeneration.current
+    const id = selectedComputer.id
+    const before = selectedComputer.enginesDetectedAt
+    setDetecting(true)
+    setErr(null)
+    try {
+      await api.requestComputerEngineDetect(id)
+      const deadline = Date.now() + 50_000
+      while (generation === detectGeneration.current && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 750))
+        if (generation !== detectGeneration.current) return
+        await useComputers.getState().refresh()
+        const after = useComputers.getState().byId[id]?.enginesDetectedAt
+        if (after && after !== before) return
+      }
+      if (generation === detectGeneration.current) throw new Error(t('me.agentsRefreshTimedOut'))
+    } catch (e) {
+      if (generation === detectGeneration.current) setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (generation === detectGeneration.current) setDetecting(false)
+    }
+  }
+  useEffect(() => {
     if (!agent || engineTouched.current) return
     const host = agent.computerId ? computersById[agent.computerId] : undefined
     if (!host) return
@@ -237,6 +273,7 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
   }, [onClose])
 
   const submit = async () => {
+    if (engineUnavailable) { setErr(t('agent.noRunnableEngine')); return }
     setErr(null)
     setBusy(true)
     try {
@@ -380,6 +417,102 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
             />
           </Field>
 
+          <Field
+            label={t('agent.runsOnLabel')}
+            hint={t('agent.runsOnHint')}
+          >
+            <Select
+              ariaLabel={t('agent.runsOnLabel')}
+              value={computerId}
+              onValueChange={changeComputer}
+              options={[
+                // Free tier has no real Cumora Cloud computer — filter any out
+                // (defensive) and append a locked Pro upsell entry instead.
+                // NOT on native: App Store Guideline 3.1.1 forbids referencing
+                // a paid tier that isn't purchasable in-app via IAP, so the
+                // iOS/Android builds omit the upsell entirely.
+                ...computers
+                  .filter((c) => !(isFreeTier && c.kind === 'cloud'))
+                  .map((c) => ({
+                    value: c.id,
+                    label: `${c.kind === 'cloud' ? '☁' : c.kind === 'vps' ? '🖥' : '💻'} ${c.name}`
+                      + (c.kind !== 'cloud' && c.status !== 'online' ? ` ${t('agent.offlineSuffix')}` : ''),
+                  })),
+                ...(isFreeTier && !isNativePlatform()
+                  ? [{ value: '__cloud_pro__', label: t('agent.upgradeToPro'), disabled: true }]
+                  : []),
+              ]}
+            />
+            {selectedComputer && selectedComputer.kind !== 'cloud' && (
+              <div className="mt-2">
+                <Select
+                  ariaLabel={t('agent.engineLabel')}
+                  value={engineChoice}
+                  onValueChange={(value) => {
+                    if (value === engineChoice) return
+                    engineTouched.current = true
+                    setEngineChoice(value)
+                    setProviderProfile('')
+                    clearModelPins()
+                  }}
+                  options={(() => {
+                    const advertised = selectedComputer.availableEngines
+                    const defaultId = advertised[0]
+                    return [
+                      { value: INHERIT_ENGINE, label: defaultId ? t('agent.engineInherit', { engine: engineLabel(defaultId) }) : t('agent.noRunnableEngine'), disabled: !defaultId },
+                      ...agentEngineChoices(selectedComputer).map((entry) => ({
+                        value: entry.id,
+                        label: engineLabel(entry.id),
+                        hint: entry.runnable ? undefined : t(entry.detected ? 'agent.engineBlocked' : 'agent.engineMissing'),
+                        disabled: !entry.runnable,
+                      })),
+                    ]
+                  })()}
+                />
+                <div className="mt-1.5 text-[11.5px] text-ink-400">{t('agent.engineHint')}</div>
+                <button type="button" disabled={detecting || selectedComputerOffline} onClick={() => { void refreshEngines() }}
+                  className="mt-2 text-[12px] font-semibold text-skype-deep disabled:opacity-50">
+                  {t(detecting ? 'agent.engineDetecting' : 'agent.engineDetect')}
+                </button>
+                {agentEngineChoices(selectedComputer).filter((entry) => entry.detected && !entry.runnable).map((entry) => (
+                  <div key={entry.id} className="mt-2 text-[11.5px] text-ink-500 break-words">
+                    {engineLabel(entry.id)}: {entry.reason || t('agent.engineBlocked')}
+                  </div>
+                ))}
+                <div className="mt-2 text-[11.5px] text-ink-400">{t('agent.localEngineSetup')}</div>
+              </div>
+            )}
+            {selectedComputerOffline && (
+              <div
+                className="mt-3 rounded-[12px] p-3"
+                style={{ background: 'var(--sky-50)', border: '1px solid var(--sky-100)' }}
+              >
+                <div className="text-[12px] font-semibold text-ink-900 mb-1">
+                  {t('agent.computerOfflineMsg', { name: selectedComputer?.name ?? '' })}
+                </div>
+                {repairErr ? (
+                  <div className="text-[11.5px] text-coral-deep bg-coral-soft rounded-[8px] p-2">{repairErr}</div>
+                ) : repairCommand ? (
+                  <>
+                    <pre className="bg-ink-900 text-cloud rounded-[9px] p-2.5 text-[11.5px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">
+                      {repairCommand}
+                    </pre>
+                    <button
+                      type="button"
+                      onClick={() => { void navigator.clipboard?.writeText(repairCommand); setRepairCopied(true) }}
+                      className="mt-2 inline-flex items-center justify-center min-w-[108px] text-[11.5px] font-semibold px-3 py-1.5 rounded-[9px] text-white transition-colors duration-200"
+                      style={{ background: repairCopied ? '#3BB273' : 'var(--skype)' }}
+                    >
+                      {repairCopied ? t('agent.copied') : t('agent.copyCommand')}
+                    </button>
+                  </>
+                ) : (
+                  <div className="text-[11.5px] text-ink-400">{t('agent.generatingReconnect')}</div>
+                )}
+              </div>
+            )}
+          </Field>
+
           <Field label={t('agent.roleLabel')} hint={t('agent.roleHint')}>
             <Input
               type="text"
@@ -485,89 +618,6 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
               />
             </Field>
           )}
-
-          <Field
-            label={t('agent.runsOnLabel')}
-            hint={t('agent.runsOnHint')}
-          >
-            <Select
-              ariaLabel={t('agent.runsOnLabel')}
-              value={computerId}
-              onValueChange={changeComputer}
-              options={[
-                // Free tier has no real Cumora Cloud computer — filter any out
-                // (defensive) and append a locked Pro upsell entry instead.
-                // NOT on native: App Store Guideline 3.1.1 forbids referencing
-                // a paid tier that isn't purchasable in-app via IAP, so the
-                // iOS/Android builds omit the upsell entirely.
-                ...computers
-                  .filter((c) => !(isFreeTier && c.kind === 'cloud'))
-                  .map((c) => ({
-                    value: c.id,
-                    label: `${c.kind === 'cloud' ? '☁' : c.kind === 'vps' ? '🖥' : '💻'} ${c.name}`
-                      + (c.kind !== 'cloud' && c.status !== 'online' ? ` ${t('agent.offlineSuffix')}` : ''),
-                  })),
-                ...(isFreeTier && !isNativePlatform()
-                  ? [{ value: '__cloud_pro__', label: t('agent.upgradeToPro'), disabled: true }]
-                  : []),
-              ]}
-            />
-            {selectedComputer && selectedComputer.kind !== 'cloud' && (
-              <div className="mt-2">
-                <Select
-                  ariaLabel={t('agent.engineLabel')}
-                  value={engineChoice}
-                  onValueChange={(value) => {
-                    if (value === engineChoice) return
-                    engineTouched.current = true
-                    setEngineChoice(value)
-                    setProviderProfile('')
-                    clearModelPins()
-                  }}
-                  options={(() => {
-                    const advertised = selectedComputer.availableEngines.length
-                      ? selectedComputer.availableEngines
-                      : (['claude'] as EngineId[])
-                    const defaultId = advertised[0]
-                    return [
-                      { value: INHERIT_ENGINE, label: t('agent.engineInherit', { engine: engineLabel(defaultId) }) },
-                      ...advertised.map((en) => ({ value: en, label: engineLabel(en) })),
-                    ]
-                  })()}
-                />
-                <div className="mt-1.5 text-[11.5px] text-ink-400">{t('agent.engineHint')}</div>
-              </div>
-            )}
-            {selectedComputerOffline && (
-              <div
-                className="mt-3 rounded-[12px] p-3"
-                style={{ background: 'var(--sky-50)', border: '1px solid var(--sky-100)' }}
-              >
-                <div className="text-[12px] font-semibold text-ink-900 mb-1">
-                  {t('agent.computerOfflineMsg', { name: selectedComputer?.name ?? '' })}
-                </div>
-                {repairErr ? (
-                  <div className="text-[11.5px] text-coral-deep bg-coral-soft rounded-[8px] p-2">{repairErr}</div>
-                ) : repairCommand ? (
-                  <>
-                    <pre className="bg-ink-900 text-cloud rounded-[9px] p-2.5 text-[11.5px] overflow-x-auto whitespace-pre-wrap break-all font-mono select-all">
-                      {repairCommand}
-                    </pre>
-                    <button
-                      type="button"
-                      onClick={() => { void navigator.clipboard?.writeText(repairCommand); setRepairCopied(true) }}
-                      className="mt-2 inline-flex items-center justify-center min-w-[108px] text-[11.5px] font-semibold px-3 py-1.5 rounded-[9px] text-white transition-colors duration-200"
-                      style={{ background: repairCopied ? '#3BB273' : 'var(--skype)' }}
-                    >
-                      {repairCopied ? t('agent.copied') : t('agent.copyCommand')}
-                    </button>
-                  </>
-                ) : (
-                  <div className="text-[11.5px] text-ink-400">{t('agent.generatingReconnect')}</div>
-                )}
-              </div>
-            )}
-          </Field>
 
           <Field label={t('agent.avatarColorLabel')} hint={t('agent.avatarColorHint')}>
             <div className="flex flex-wrap gap-2">
@@ -719,7 +769,7 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
           <button
             type="button"
             onClick={submit}
-            disabled={busy || !name.trim() || !systemPrompt.trim()}
+            disabled={busy || engineUnavailable || !name.trim() || !systemPrompt.trim()}
             className="px-5 py-2 rounded-[9px] text-[12.5px] font-semibold text-white transition disabled:opacity-50"
             style={{
               background: 'var(--skype)',

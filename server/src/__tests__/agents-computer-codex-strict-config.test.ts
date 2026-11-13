@@ -130,7 +130,7 @@ test('the untrusted marking survives alongside the rest of the secure set', { sk
     'default_permissions="cumora"',
     'permissions.cumora.network.enabled=false',
     'shell_environment_policy.inherit="none"',
-    'web_search="disabled"',
+    'web_search="live"',
     'features.hooks=false',
   ]) {
     assert.ok(argv.includes(expected), `missing from the secure set: ${expected}`)

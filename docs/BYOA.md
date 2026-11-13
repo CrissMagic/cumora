@@ -70,17 +70,86 @@ resumes the session reported by that engine. Cumora records independent
 `byoa-deepseek` and `byoa-mimo` sources. Missing model or usage information stays
 unknown rather than being attributed to Claude or OpenCode.
 
-Both adapters require the existing explicit compatibility opt-in
-`CUMORA_BYOA_ALLOW_UNSANDBOXED=1`. Main turns allow local tools; classification
+Both adapters require explicit compatibility permission. Prefer the local,
+per-engine `CUMORA_BYOA_COMPAT_ENGINES=deepseek` opt-in (comma-separated ids;
+use `mimo` for MiMo). This does **not** relax Codex or Claude isolation, does
+not turn on the computer-wide compatibility switch, and is never enabled merely
+because a binary is installed. `CUMORA_BYOA_ALLOW_UNSANDBOXED=1` remains the
+broader, computer-wide escape hatch. Main turns allow local tools; classification
 and doctor calls block tool execution. Review the compatibility-mode boundary
 below before opting in. In a source checkout, use the modified daemon rather
 than an older published npm package:
 
 ```powershell
-$env:CUMORA_BYOA_ALLOW_UNSANDBOXED = '1'
+$env:CUMORA_BYOA_COMPAT_ENGINES = 'deepseek'
 # Replace CODE with the code shown by Cumora; choose deepseek or mimo.
 node --import tsx server/src/cli-bin.ts agent computer --pair CODE --engine deepseek
 ```
+
+If this computer is already paired, omit `--pair CODE` to retain its identity,
+agents and sessions. For a standalone source bundle, run
+`npm run build --prefix agent-cli`, then
+`node agent-cli/dist/cli.js agent computer --server https://YOUR-CUMORA-HOST`.
+An older `npx cumora@latest` installation does not gain source-checkout features
+until that version is published; configure its supervisor to run the built
+bundle and set `CUMORA_AUTO_UPDATE=0` so an npm update cannot replace it.
+Keep the per-engine opt-in in the service environment. Newly installed service
+definitions preserve it; an existing service needs its environment updated and
+the daemon restarted. Never run two daemons with the same paired identity.
+
+On Windows, credentials can be entered without exposing them in shell history:
+
+```powershell
+[Environment]::SetEnvironmentVariable('DEEPSEEK_API_KEY', (Read-Host 'DeepSeek API Key' -MaskInput), 'User')
+```
+
+Restart the background launcher after configuring it to load this user variable
+into the daemon process. Setting a user variable does not update an already
+running service's environment. Alternatively configure dsh's own credentials
+service for its selected provider route. `MISSING_CREDENTIAL` means the engine
+started but provider authentication is incomplete; detecting `dsh` on PATH does
+not prove that a model request will succeed. Do not store provider keys in a
+repository, mobile build, or the cloud relay.
+
+In desktop **Agents → Hire** or mobile **Agents → +**, choose the paired
+computer under **Runs on**, then **DeepSeek Harness** under **Engine**. The
+picker shows missing engines disabled and installed-but-blocked engines with
+their reason. **Detect engines again** waits for the daemon's new inventory;
+it does not install a CLI, grant compatibility permission, or configure keys.
+
+## Research and substantive analysis
+
+Casual chat stays lightweight. Research/evaluation questions use the shared
+analysis guidance: verify the premise, establish one owner from the first
+posted plan (or follow an explicitly named owner), delegate distinct evidence,
+implications and challenges to conversation members, then integrate the result.
+Contributors mention the owner when returning findings. Plans are progress
+updates; a missing source is disclosed rather than treated as a verified claim.
+This is prompt-guided collaboration using the existing freshness/HELD gate,
+not a guaranteed workflow engine. It does not overwrite custom personas.
+
+Secure Codex main turns allow hosted web search (`CUMORA_CODEX_WEB_SEARCH=live`
+by default, with `cached` and `disabled` also supported); classification keeps
+it disabled. Hosted search availability depends on the model/provider. The
+local BYOA broker therefore also exposes these commands through the existing
+MCP `cli` tool, or the CLI shim for compatibility engines:
+
+```json
+{"argv":["research","search","public research query"]}
+{"argv":["research","read","https://primary-source.example/announcement"]}
+```
+
+Search uses public Bing RSS without a new API key. Results may be incomplete,
+irrelevant, or unavailable; `site:example.com` filters returned domains, and
+empty results do not disprove a claim. Read primary pages before citing facts.
+RSS feed dates and retrieval timestamps are not article publication dates.
+The reader accepts public HTTPS on port 443 only, pins connections to validated
+DNS answers, rechecks redirects, and caps downloads at 1 MiB / 12 seconds and
+model text at 16,000 characters. It sends no cookies, provider keys or runtime
+JWTs. Private, loopback and metadata destinations are blocked. Web content is
+untrusted evidence, not instructions. Do not put secrets or private chat content
+in public search queries. This broker capability is local to BYOA; managed
+cloud agents continue to use their existing browser tools.
 
 ## Codex login and state isolation
 

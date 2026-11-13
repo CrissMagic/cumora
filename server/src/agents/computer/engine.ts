@@ -444,6 +444,16 @@ export function allowUnsandboxedByoa(env: NodeJS.ProcessEnv = process.env): bool
   return env[ALLOW_UNSANDBOXED_BYOA_ENV] === '1'
 }
 
+/** A local opt-in for adapters without a sandbox. Never relaxes Codex/Claude. */
+export function compatibilityEngineIds(env: NodeJS.ProcessEnv = process.env): EngineId[] {
+  const requested = new Set((env.CUMORA_BYOA_COMPAT_ENGINES ?? '').split(',').map((id) => id.trim()))
+  return ENGINE_IDS.filter((id) => !SANDBOXED_ENGINE_IDS.includes(id) && requested.has(id))
+}
+
+export function engineUsesCompatibilityMode(id: EngineId, env: NodeJS.ProcessEnv = process.env): boolean {
+  return allowUnsandboxedByoa(env) || compatibilityEngineIds(env).includes(id)
+}
+
 export function runnableEngineIds(
   installed: readonly EngineId[],
   env: NodeJS.ProcessEnv = process.env,
@@ -451,7 +461,7 @@ export function runnableEngineIds(
 ): EngineId[] {
   if (allowUnsandboxedByoa(env)) return [...installed]
   const safe = new Set(SANDBOXED_ENGINE_IDS)
-  return installed.filter((id) => safe.has(id) && !(platform === 'win32' && id === 'claude'))
+  return installed.filter((id) => engineUsesCompatibilityMode(id, env) || (safe.has(id) && !(platform === 'win32' && id === 'claude')))
 }
 
 export interface RunnableEngineEvaluation {
@@ -522,7 +532,7 @@ export async function evaluateRunnableEngines(
   const candidates = runnableEngineIds(installed, env, platform)
   if (allowUnsandboxedByoa(env)) return { runnable: candidates, blocked: [] }
 
-  const snapshot = await snapshotDetectedEngines(candidates)
+  const snapshot = await snapshotDetectedEngines(candidates.filter((id) => !engineUsesCompatibilityMode(id, env)))
   const probes = new Map(await Promise.all(snapshot.map(async (entry) => {
     const minimum = SECURE_ENGINE_MIN_VERSIONS[entry.id] ?? ''
     const fingerprint = engineBinaryFingerprint(entry.path)
@@ -540,9 +550,19 @@ export async function evaluateRunnableEngines(
     ? { bwrap: await binOnPath('bwrap'), socat: await binOnPath('socat') }
     : { bwrap: true, socat: true }
   const runnable: EngineId[] = []
-  const blocked: RunnableEngineEvaluation['blocked'] = []
+  const blocked: RunnableEngineEvaluation['blocked'] = installed.filter((id) => !candidates.includes(id)).map((id) => ({
+    id,
+    reason: SANDBOXED_ENGINE_IDS.includes(id)
+      ? 'secure execution is not supported on this platform'
+      : `requires local compatibility opt-in: CUMORA_BYOA_COMPAT_ENGINES=${id} (host files and network)`,
+    state: 'confirmed-incompatible',
+  }))
   const temporarilyUnverifiable: EngineId[] = []
   for (const id of candidates) {
+    if (engineUsesCompatibilityMode(id, env)) {
+      runnable.push(id)
+      continue
+    }
     const probe = probes.get(id)
     const version = probe?.version ?? null
     const reason = secureEngineCapabilityReason(id, version, platform, linuxSandboxDeps)
@@ -2027,6 +2047,13 @@ export function noteCodexConfigRejection(err: string | undefined, onLog?: (line:
   return true
 }
 
+export function codexWebSearchMode(env: NodeJS.ProcessEnv): 'disabled' | 'cached' | 'live' {
+  const mode = env.CUMORA_CODEX_WEB_SEARCH?.trim()
+  if (!mode) return 'live'
+  if (mode === 'disabled' || mode === 'cached' || mode === 'live') return mode
+  throw new Error('CUMORA_CODEX_WEB_SEARCH must be disabled, cached or live')
+}
+
 /** Shared sandbox profile for exec, persistent sessions and wake probes. */
 function codexSecureConfigOverrides(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
   const workspaceAccess = readOnly ? 'read' : 'write'
@@ -2040,7 +2067,9 @@ function codexSecureConfigOverrides(args: { home: string; env: NodeJS.ProcessEnv
   const secureArgs = [
     ...CODEX_SECURE_CONFIG_ARGS,
     '-c', filesystem,
-    '-c', 'web_search="disabled"',
+    // Hosted search does not grant the shell network or filesystem access.
+    // Classification remains tool-free; only main turns can research sources.
+    '-c', `web_search=${tomlString(readOnly ? 'disabled' : codexWebSearchMode(args.env))}`,
     '-c', 'features.hooks=false',
     '-c', 'features.apps=false',
     '-c', 'features.remote_plugin=false',

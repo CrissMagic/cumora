@@ -344,6 +344,8 @@ async function fetchImageBytesWithDependencies(
   rawUrl: string,
   options: RequiredImageFetchOptions,
   dependencies: ImageFetchDependencies,
+  acceptsMime: (mime: string) => boolean = (mime) => mime.startsWith('image/'),
+  acceptsUrl: (url: URL) => boolean = () => true,
 ): Promise<ImageBytesResult> {
   let current: URL
   try {
@@ -356,6 +358,7 @@ async function fetchImageBytesWithDependencies(
   const timer = setTimeout(() => controller.abort(), options.timeoutMs)
   try {
     for (let redirects = 0; ; redirects += 1) {
+      if (!acceptsUrl(current)) return { ok: false, reason: 'blocked' }
       const target = await resolveImageTarget(current, controller.signal, dependencies.lookup)
       const response = await abortable(dependencies.request(target, controller.signal), controller.signal)
       const location = headerValue(response.headers, 'location')
@@ -378,7 +381,7 @@ async function fetchImageBytesWithDependencies(
 
       const mime = (headerValue(response.headers, 'content-type') ?? '')
         .split(';')[0].trim().toLowerCase()
-      if (!mime.startsWith('image/')) {
+      if (!acceptsMime(mime)) {
         response.cancel()
         return { ok: false, reason: 'bad-type' }
       }
@@ -431,6 +434,21 @@ export async function fetchImageBytes(
     timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
     maxRedirects: options.maxRedirects ?? MAX_REDIRECTS,
   }, productionDependencies)
+}
+
+/** Public research pages share the image downloader's DNS pinning, redirect
+ * checks and resource caps. Never carries browser cookies or provider keys. */
+export async function fetchPublicText(
+  url: string,
+  options: ImageFetchOptions = {},
+  dependencies: ImageFetchDependencies = productionDependencies,
+): Promise<ImageBytesResult> {
+  return fetchImageBytesWithDependencies(url, {
+    maxBytes: options.maxBytes ?? 1024 * 1024,
+    timeoutMs: options.timeoutMs ?? 12_000,
+    maxRedirects: options.maxRedirects ?? MAX_REDIRECTS,
+  }, dependencies, (mime) => ['text/html', 'text/plain', 'text/xml', 'application/xml', 'application/rss+xml', 'application/xhtml+xml'].includes(mime),
+  (target) => target.protocol === 'https:' && (!target.port || target.port === '443'))
 }
 
 /** Integration-test hook for call sites that consume the centralized helper. */
