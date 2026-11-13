@@ -7,6 +7,7 @@ import { useParticipants } from '@/stores/participants'
 import { useConversations } from '@/stores/conversations'
 import { IChat, IPlus } from '@/components/icons'
 import { MobilePageHeader } from './MobilePageHeader'
+import { useMobileBack } from './useMobileBack'
 import { AgentEditor } from '@/components/AgentEditor'
 import { HumanBadge } from '@/components/HumanBadge'
 import { type MessageKey, useTLabel } from '@/lib/i18n'
@@ -49,6 +50,8 @@ export function MobileAgents() {
   const meId = useMe()
   const [editing, setEditing] = useState<Participant | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
+  const active = useApp((s) => s.view === 'agents')
+  useMobileBack(active && editorOpen, () => setEditorOpen(false))
   // Which agent's DM is being created right now, so a double-tap on a slow
   // network cannot fire two openDirect calls.
   const [opening, setOpening] = useState<string | null>(null)

@@ -11,6 +11,7 @@ import { MobileLibrary } from './MobileLibrary'
 import { MobileAgents } from './MobileAgents'
 import { MobileMe } from './MobileMe'
 import { useMobileProjects } from './useMobileProjects'
+import { navigateMobileBack } from './navigationBack'
 import { DocumentEditor } from '@/components/DocumentEditor'
 import { BoardPeekContent, CalendarEventPeekContent } from '@/components/ArtifactPeekContent'
 import { useDocuments } from '@/stores/documents'
@@ -121,6 +122,15 @@ export function MobileApp() {
   const infoParticipantId = useApp((s) => s.infoAgentId)
   const closeAgentInfo = useApp((s) => s.closeAgentInfo)
   const [whisperId, setWhisperId] = useState<string | null>(null)
+
+  useEffect(() => {
+    const back = (event: Event) => {
+      if (event.defaultPrevented) return
+      if (navigateMobileBack(useApp.getState(), { open: whisperId !== null, close: () => setWhisperId(null) })) event.preventDefault()
+    }
+    window.addEventListener('cumora:navigation-back', back)
+    return () => window.removeEventListener('cumora:navigation-back', back)
+  }, [whisperId])
 
   // Edge-swipe-back gestures for deep screens. Hooks are called
   // unconditionally (the per-page motion.div is conditional, but the

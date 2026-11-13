@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, type ShippingFeatureDetail, type ShippingFeatureStatus, type ShippingRelease, type ShippingVerification } from '@/api/client'
 import { useShipping } from '@/stores/shipping'
+import { useApp } from '@/stores/app'
+import { useMobileBack } from '@/mobile/useMobileBack'
 import { useParticipants } from '@/stores/participants'
 import { IBack, IPlus, IShip } from '@/components/icons'
 import { Select } from '@/components/Select'
@@ -76,6 +78,11 @@ export function ShippingWorkspace({ compact = false }: { compact?: boolean }) {
   const load = useShipping((s) => s.load)
   const select = useShipping((s) => s.select)
   const [creating, setCreating] = useState(false)
+  const active = useApp((s) => s.view === 'shipping')
+  useMobileBack(compact && active && (creating || selectedId !== null), () => {
+    if (creating) setCreating(false)
+    else void select(null)
+  })
 
   useEffect(() => { void load() }, [load])
 

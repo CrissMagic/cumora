@@ -16,6 +16,7 @@ import { Keyboard } from '@capacitor/keyboard'
 import { SplashScreen } from '@capacitor/splash-screen'
 import { StatusBar, Style } from '@capacitor/status-bar'
 import { registerPlugin } from '@capacitor/core'
+import { dispatchAndroidBack } from './androidBack'
 
 /**
  * iOS-only bridge to `ASWebAuthenticationSession` — Apple's dedicated
@@ -154,10 +155,11 @@ export async function bootNative(): Promise<void> {
 
   // Hardware Android back button — let the renderer intercept first.
   try {
-    App.addListener('backButton', ({ canGoBack }) => {
-      const ev = new CustomEvent('cumora:hardware-back', { cancelable: true })
-      const handled = !window.dispatchEvent(ev)
-      if (!handled && !canGoBack) void App.exitApp()
+    await App.addListener('backButton', ({ canGoBack }) => {
+      dispatchAndroidBack(window, canGoBack, {
+        historyBack: () => window.history.back(),
+        exit: () => { void App.exitApp() },
+      })
     })
   } catch (err) {
     console.warn('[native] back-button listener failed', err)

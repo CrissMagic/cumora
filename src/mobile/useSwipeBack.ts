@@ -171,15 +171,23 @@ export function useSwipeBackProps(onBack: () => void): SwipeBackBundle {
       })
     }
 
+    // Android's edge gesture can cancel WebView touches before delivering its
+    // native Back event. Cancellation must never commit a second page pop.
+    const onTouchCancel = () => {
+      active = false
+      direction = 'none'
+      animate(x, 0, { type: 'spring', stiffness: 320, damping: 38, mass: 1 })
+    }
+
     el.addEventListener('touchstart', onTouchStart, { passive: true })
     el.addEventListener('touchmove', onTouchMove, { passive: false })
     el.addEventListener('touchend', onTouchEnd, { passive: true })
-    el.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    el.addEventListener('touchcancel', onTouchCancel, { passive: true })
     return () => {
       el.removeEventListener('touchstart', onTouchStart)
       el.removeEventListener('touchmove', onTouchMove)
       el.removeEventListener('touchend', onTouchEnd)
-      el.removeEventListener('touchcancel', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchCancel)
     }
   }, [el, x])
 

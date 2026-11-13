@@ -109,6 +109,18 @@ Android Back closes the project switcher or conversation picker; closing the
 switcher restores focus to its trigger. Other root sections (Documents, Boards
 and Calendar) retain their existing behavior.
 
+Android system Back (including an edge swipe) first closes a visible sheet or
+editor, then returns one application navigation layer. Chat details return to
+the chat; the chat returns to its list. Participant/document/board/calendar
+overlays close before the screen underneath. Hidden tabs cannot consume Back.
+Only a root screen with no application layer or browser history left may exit.
+A cancelled WebView touch resets the swipe animation without navigating, so
+the subsequent Android Back cannot pop twice.
+
+Run `node --import tsx --test tests/android-back.test.ts` for navigation behavior.
+On Android with gesture navigation enabled, also verify the real edge gesture
+from chat details and chat, sheet dismissal, and a cancelled in-app swipe.
+
 The list/host/folder/conversation organization was informed by
 [dsh-Go's workspace screen](https://github.com/ccch1mneyyy/dsh-Go/blob/708bdc3256ddbecdb90891c41f5dbdce4326b610/app/lib/ui/workspace/workspaces_page.dart)
 and its workspace golden screenshots. Cumora uses its existing React components,

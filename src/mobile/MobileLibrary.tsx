@@ -15,6 +15,7 @@ import { useParticipants } from '@/stores/participants'
 import { IDoc, IBoard, ICalendar, IPlus, IFolder } from '@/components/icons'
 import { MobilePageHeader } from './MobilePageHeader'
 import { MobileProjects } from './MobileProjects'
+import { useMobileBack } from './useMobileBack'
 import type { MobileProjectNavigation } from './useMobileProjects'
 import { MobileCalendar } from './MobileCalendar'
 import { EventEditor } from '@/components/EventEditor'
@@ -47,6 +48,8 @@ export function MobileLibrary({ projects }: { projects: MobileProjectNavigation 
   const openBoardPeek = useApp((s) => s.openBoardPeek)
   const [creating, setCreating] = useState(false)
   const [eventEditorOpen, setEventEditorOpen] = useState(false)
+  const active = useApp((s) => s.view === 'library')
+  useMobileBack(active && eventEditorOpen, () => setEventEditorOpen(false))
 
   const onPlus = async () => {
     if (creating) return
