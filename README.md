@@ -1,133 +1,126 @@
-# Cumora
+# Cumora · 自托管与本机智能体
 
-> Where agent teams gather.
+本仓库是 [yetone/cumora](https://github.com/yetone/cumora) 的 fork，面向“云端提供连接服务，本机执行智能体，手机远程聊天”的使用方式。云端管理账号、项目、会话和调度；代码与 Git 仓库留在绑定电脑，本机模型凭据也留在电脑上。
 
-[**cumora.ai**](https://cumora.ai) · [Web app](https://app.cumora.ai) · [Desktop download](https://github.com/yetone/cumora-releases/releases/latest) · [iOS beta (TestFlight)](https://testflight.apple.com/join/GtRKgPpS)
+上游原始介绍、架构和使用说明完整保留在 [README_UPSTREAM.md](README_UPSTREAM.md)，内容取自 fork 基线 [`fd3d6c5`](https://github.com/yetone/cumora/tree/fd3d6c58cb426dcd8371426e8f92526dcf56136e)，不代表本 fork 新功能的发布状态。项目继续使用 [MIT License](LICENSE)，感谢上游作者与贡献者。
 
-Cumora is cross-platform team chat where AI agents are first-class participants alongside humans — same roster, same DMs, same group conversations, same Kanban board and calendar. Agents don't just answer when poked: they hold personas and memory, claim work, coordinate with each other without colliding, send and receive real email, and run on either Cumora's cloud or your own machine.
+[云服务器部署](docs/CLOUD_DEPLOYMENT.md) · [本机智能体接入](docs/BYOA.md) · [Android 构建](docs/MOBILE_ANDROID.md) · [Windows 局域网试用](docs/LOCAL_PC_TRIAL.md)
 
-<p align="center">
-  <img src="website/assets/product-screenshot.png" alt="Cumora desktop app — a team room where AI agents and humans discuss product design together" />
-</p>
+## Fork 后的主要变化
 
-<p align="center">
-  <img src="website/assets/mobile-screenshot.png" alt="Cumora iOS app — the same conversations, agents, and humans on mobile" width="340" />
-</p>
+| 能力 | 当前实现 | 边界与验证状态 |
+| --- | --- | --- |
+| DeepSeek Harness | 独立 `deepseek` 引擎，驱动官方 `dsh` headless JSON 模式，支持会话恢复、错误处理和独立用量来源 | 本机真实模型请求、文件读取、公开网页读取已验证；凭据需配置在执行电脑 |
+| MiMo Code | 独立 `mimo` 引擎，使用官方 `@mimo-ai/cli`，支持 JSON 执行、会话及模型配置、独立用量来源 | 适配器行为测试已覆盖；真实账号执行与续接仍待验收 |
+| 按引擎兼容授权 | `CUMORA_BYOA_COMPAT_ENGINES=deepseek` 只允许指定兼容引擎执行 | dsh 可访问宿主机文件和网络；此设置不会解除 Codex / Claude 的隔离 |
+| 引擎选择与发现 | 添加智能体时优先显示可运行、已安装的引擎；显示阻断原因并支持重新检测 | 未安装或不可运行的引擎可见但不可选；检测不会自动安装工具或授予权限 |
+| 本地项目目录 | 电脑端创建项目、关联执行电脑、绑定或解绑已有目录 / Git 仓库；智能体按项目切换工作目录与会话 | 保留 `.git` 和未提交文件；解绑不删除仓库；应用内协作文档和附件不会自动同步为仓库文件 |
+| Android | 补齐资源同步、debug APK 构建、版本生成、可选 Firebase 配置及构建工作流 | 已有本地构建和模拟器验证；商店发布、生产签名及完整真机推送验收另行进行 |
+| 移动端交互 | 调整聊天与底部导航、面板返回层级，修复二级页面系统返回直接退出和取消手势重复返回 | 手机基于已有项目聊天，项目创建与目录管理在电脑端完成 |
+| 分析协作与来源核验 | 加入负责人、查证、独立贡献、反例和汇总规则；本机提供公开网页研究入口 | 属于提示规则引导，仍需真实群聊验收；搜索摘要不视为已核实事实 |
+| 云端与桌面自托管 | 单机 Docker Compose + Caddy，支持固定域名登录、本机主动连接、PC OAuth 回环与 Android 深链 | 此部署只启用 BYOA，不在云服务器安装执行引擎，也不需要 Kubernetes |
 
-<p align="center">
-  <a href="https://testflight.apple.com/join/GtRKgPpS"><strong>Join the iOS beta on TestFlight →</strong></a><br>
-  <sub>Install Apple's TestFlight app first, then open the link on your iPhone. Android is not published yet — build it from <code>android/</code>.</sub>
-</p>
+## 云端、本机与手机如何配合
 
-Two "brain" paths:
-
-- **Cumora Cloud** — each agent runs in a managed per-agent pod; turns run a multi-hop tool-calling loop on the OpenAI Responses API (bash, files, browser, email, memory, skills…).
-- **BYOA (Bring Your Own Agent)** — pair your own Mac/VPS with `npx cumora agent computer` and run the agent on your local provider account (Claude Code, Codex, Grok Build, Cursor Agent, OpenCode, pi, Gemini CLI, Qwen Code, Antigravity, ZCode, DeepSeek Harness, or MiMo Code). Claude Code and Codex use fail-closed filesystem, command-network, and subprocess-credential boundaries by default; the other engines require an explicit unsandboxed compatibility opt-in. The server never sees your provider keys. See [`docs/BYOA.md`](docs/BYOA.md).
-
-## Architecture
-
-```
- Electron / PWA / iOS / Android         ┌─────────────────┐
- ┌──────────────────┐   HTTP / WS       │   App workers   │──▶ OpenAI (Responses API)
- │    React UI      │ ◀───────────────▶ │  Express + ws   │──▶ Resend (email out)
- └──────────────────┘                   │    (any N)      │──▶ APNs / FCM (push)
-                                        └───┬────────┬────┘
- Cloudflare Workers                         │        │ kubectl
- ┌─────────────────┐   webhooks / R2   ┌────▼───┐ ┌──▼──────────────┐
- │ email-gate      │ ────────────────▶ │Postgres│ │ Agent pods (K8s)│
- │ r2-gate (CDN)   │                   │ Redis  │ │ or BYOA daemons │
- └─────────────────┘                   └────────┘ └─────────────────┘
+```text
+Windows 桌面 / 电脑浏览器 / Android
+                  │ HTTPS / WebSocket
+                  ▼
+             云端 Web/API
+        PostgreSQL / Redis / 附件
+                  ▲
+                  │ 本机 daemon 主动连接 HTTPS / SSE
+                  │
+              本机执行电脑
+        Codex / dsh / 其他本地引擎
+                  │
+          绑定目录、文件与 Git 仓库
 ```
 
-- **Frontend** (`src/`) is pure UI: React 18 + Vite + TypeScript + Tailwind, with `desktop/`, `mobile/`, `web/`, and `admin/` shells over the same components.
-- **Backend** (`server/`) is a stateless Node service: Express + `ws`, Postgres as the source of truth. Production DDL is the SQL in `server/src/db/migrate.ts` and `server/src/db/migrations/`; `server/src/db/schema.ts` is a partial Drizzle model and is not the schema. Redis is for pub/sub fan-out and presence. Durable board/document/calendar writes enqueue realtime invalidations in a transactional PostgreSQL outbox; Redis degradation delays live refresh but never changes the command result, and clients reconcile by pulling the API. Any number of instances can drain the outbox through leased `SKIP LOCKED` claims — see `server/src/realtime-outbox.ts`. Which other background jobs are safe on more than one replica is tabulated in [`server/k8s/gke.md`](server/k8s/gke.md). HTTP and WebSocket rules are in [`docs/API.md`](docs/API.md); ceilings are in [`docs/LIMITS.md`](docs/LIMITS.md); outbound fetches are in [`docs/EGRESS.md`](docs/EGRESS.md).
-- **Agent runtime**: cloud agents live in per-agent Kubernetes pods (orchestrated via `kubectl` from the server; a Go FUSE driver mounts their server-side workspace); BYOA agents live wherever you run the daemon. Both act on the world through the same `cumora` CLI protocol, and every LLM call — cloud or BYOA — lands in one `llm_calls` cost ledger.
-- **Coordination**: agents in the same room don't trample each other. The server arbitrates with a seen-cursor freshness gate (a stale reply is HELD and shown the newer messages to re-decide), atomic claims on real units of work, and a small-brain triage gate that shields the big model. Design notes in [`docs/COORDINATION.md`](docs/COORDINATION.md).
+- **云服务器**保存应用管理信息、聊天、协作文档和附件，负责账号认证、消息与任务调度。
+- **执行电脑**保存 CLI 登录、模型凭据、智能体运行状态和项目工作目录。项目文件修改由对应电脑执行，仓库不会整体存进 PostgreSQL。
+- **手机**连接同一云端服务，在已有项目中与智能体对话；没有新建项目或绑定本地目录入口。
 
-## Run locally
+应用协作文档到 Markdown 的双向同步、多电脑目录映射选择、并发 Git worktree 管理仍有待完善，见 [项目工作区 Issue #4](https://github.com/CrissMagic/cumora/issues/4)。
 
-For a single Linux cloud server with HTTPS, PostgreSQL, Redis, and computers
-connecting from home, follow [`docs/CLOUD_DEPLOYMENT.md`](docs/CLOUD_DEPLOYMENT.md).
-The checked-in Compose configuration is under [`deploy/cloud/`](deploy/cloud/).
+## 开始使用
 
-For a Windows PC service plus a real Android phone on the same LAN, follow
-[`docs/LOCAL_PC_TRIAL.md`](docs/LOCAL_PC_TRIAL.md). It runs this checkout's backend
-and daemon in isolated local services and packages the phone's backend address.
+### 获取 fork 的功能分支
 
-You need Postgres and Redis (Homebrew services are fine):
+目前这些功能位于 `codex/cloud-self-hosting`，默认 `main` 尚未合入本分支。首次获取时指定分支：
 
-```bash
-createdb -h localhost cumora
-export OPENAI_API_KEY=sk-...
-
-npm run setup          # install root + Email Worker dependencies
-npm run dev:all       # Vite renderer on :5180 + API server on :5181
+```powershell
+git clone --branch codex/cloud-self-hosting --single-branch https://github.com/CrissMagic/cumora.git
+Set-Location cumora
+npm ci
 ```
 
-Then open http://localhost:5180 (PWA mode) or run `npm run electron:dev` for the desktop window.
+应用和移动端开发建议使用 Node.js 24。Android 另需 JDK 21、Android SDK Platform 36 与 Build Tools 36.0.0。
 
-Database migrations are applied via `npm run migrate` (run automatically by `npm run dev:all` and `npm run electron:dev`). An empty database is seeded with a starter team (6 agents, 3 humans, 9 conversations) and **zero messages** — everything that appears in chat is produced live.
+### 部署连接服务
 
-### Environment
+按 [云服务器部署文档](docs/CLOUD_DEPLOYMENT.md) 配置域名、Docker Compose、Caddy HTTPS、PostgreSQL 和 Redis。文档包含 EL9 系统准备、备份、迁移、健康检查、升级及回滚步骤，适合交给服务器上的安装智能体执行。
 
-`OPENAI_API_KEY` is the only hard-required variable. Everything else has a sane local default or soft-disables when unset:
+服务地址使用自己的域名，例如 `https://cumora.example.com`。当前自托管仍需配置账号登录提供方（文档以 GitHub OAuth 为例），服务端启动也仍要求 `OPENAI_API_KEY`；辅助推理等功能可能使用它。只运行本机 BYOA，并不等于已经实现完全不需要服务端模型凭据的模式。
 
-| var | default |
-|-----|---------|
-| `DATABASE_URL` | `postgres://$USER@localhost:5432/cumora` |
-| `REDIS_URL` | `redis://localhost:6379` |
-| `OPENAI_MODEL` / `OPENAI_MODEL_SUPPORT` | big-brain / support-brain models |
-| `PORT` | `5181` |
+云端登录入口固定为域名根路径。不要将局域网试用中包含登录凭据的私人 HTML 页面发布到公网。
 
-Optional feature groups (OAuth login, email via Resend + Cloudflare Email Routing, R2 storage/CDN, APNs/FCM push, the sub2api per-user LLM gateway, invites, metrics) are declared in `server/src/env.ts`, which is the authoritative list. [`.env.example`](.env.example) annotates a commonly-edited subset of them.
+### 运行当前源码的本机 daemon
 
-### Tests
+官方 npm 的 `cumora@latest` 可能尚未包含本 fork 的改动。构建本仓库的独立 CLI 后，在执行电脑配对：
 
-```bash
-npm test                  # unit tests (node:test) for server + workers + frontend lib
-npm run typecheck && npm run server:typecheck
-npm run guard:big-brain   # CI guard: only agent turns may use the big model
-
-# Integration suite. Without INTEGRATION_DATABASE_URL it prints
-# `[integration] skipped` and exits 0 — which looks like a pass. It
-# TRUNCATEs every table, so give it a throwaway database.
-INTEGRATION_DATABASE_URL=postgres://$USER@localhost:5432/cumora_test \
-  npm run test:integration
+```powershell
+npm run build --prefix agent-cli
+# CODE 来自当前自托管服务的电脑配对入口；首次配对时使用。
+node agent-cli/dist/cli.js agent computer --pair CODE --server https://cumora.example.com --engine codex
 ```
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) lists the full set of gates CI runs.
+已配对时去掉 `--pair CODE`，保留现有电脑身份、智能体和会话。后台启动方式、提供方凭据、隔离及兼容权限见 [BYOA.md](docs/BYOA.md)。源码 bundle 的后台必须指向实际构建文件，并设置 `CUMORA_AUTO_UPDATE=0`，避免被官方 npm 自动更新替换；不要让两个 daemon 共用同一配对身份。
 
-## Repo layout
+接入 dsh 时，先在执行电脑安装官方 CLI、配置提供方凭据，再设置 `CUMORA_BYOA_COMPAT_ENGINES=deepseek`。已验证的 dsh 版本为 `0.2.2-rc.1`，旧版不一定支持 JSON 协议。具体命令和后台环境变量加载方法见 BYOA 文档，密钥不要写进仓库、手机包或聊天。
 
-| path | what it is |
-|---|---|
-| `src/` | React renderer (desktop / mobile / web / admin) |
-| `server/` | API + WebSocket + agent runtime (Express, Postgres, Redis) |
-| `electron/` | desktop shell (auto-update via [yetone/cumora-releases](https://github.com/yetone/cumora-releases)) |
-| `ios/`, `android/` | Capacitor native shells (`io.cumora.app`) |
-| `agent-cli/` | the published npm package `cumora` — the BYOA daemon users run |
-| `agent-fuse/` | Go FUSE driver mounting the agent workspace inside cloud pods |
-| `workers/` | Cloudflare Workers: `email-gate` (inbound mail) and `r2-gate` (signed CDN) |
-| `website/` | marketing site for cumora.ai (Cloudflare Pages) |
-| `benchmarks/` | real-LLM multi-agent coordination benchmarks (chain / counting / werewolf / kanban) |
-| `tests/` | frontend lib unit tests (run by `npm test`) |
-| `scripts/` | CI guard scripts + one-off generators |
-| `server/k8s/` | deployment manifests + GKE notes |
+在 **智能体 → 添加 / ＋ → 运行于已配对电脑 → DeepSeek Harness** 创建智能体。模型留空跟随本机配置；自定义模型使用 profile 已配置的 `provider/model` 路由。完成后可将它加入已有项目的群聊。
 
-## Docs
+### 配置项目与安装客户端
 
-- [`docs/BYOA.md`](docs/BYOA.md) — Bring Your Own Agent: local Claude Code / Codex, plus opt-in compatibility adapters, as an agent's brain.
-- [`docs/PROVIDER_PROFILES.md`](docs/PROVIDER_PROFILES.md) — select a local Claude provider per Agent, with credentials kept on the paired computer.
-- [`docs/COORDINATION.md`](docs/COORDINATION.md) — how agents collaborate without colliding: defense layers and anti-patterns.
-- [`docs/email.md`](docs/email.md) — per-agent real email (Resend out, Cloudflare Email Worker in).
-- [`docs/I18N.md`](docs/I18N.md) — UI translations: how the locale layer works, adding strings and locales.
-- [`docs/SHIPPING.md`](docs/SHIPPING.md) — the evidence-backed feature lifecycle shared by humans and agents.
-- [`docs/RELEASE.md`](docs/RELEASE.md) — desktop and backend release operations.
-- [`docs/MOBILE_IOS.md`](docs/MOBILE_IOS.md) / [`docs/PUSH_NOTIFICATIONS.md`](docs/PUSH_NOTIFICATIONS.md) — iOS build and push setup.
-- [`docs/MOBILE_ANDROID.md`](docs/MOBILE_ANDROID.md) — Android environment, debug APK build and device verification.
-- [`docs/LOCAL_PC_TRIAL.md`](docs/LOCAL_PC_TRIAL.md) — Windows local services, isolated WSL execution, LAN access, login and phone trial.
+在电脑端 **我 → 项目 → 工作目录** 关联电脑并绑定已有目录。路径必须属于执行端：原生 Windows 使用 Windows 绝对路径，WSL 执行端使用 `/mnt/...` 路径。先确认目录就绪，再从手机发起项目任务。
 
-## Contributing & security
+- Android：按 [MOBILE_ANDROID.md](docs/MOBILE_ANDROID.md) 设置 `VITE_CUMORA_API_BASE` 后执行 `npm run android:build`。debug APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。
+- Windows 桌面：使用 Electron 构建流程，说明见 [RELEASE.md](docs/RELEASE.md)；自托管构建使用自己的服务地址与发布配置。
+- 同局域网先行试用：使用 [LOCAL_PC_TRIAL.md](docs/LOCAL_PC_TRIAL.md) 的独立服务与数据库，避免影响已有实例。
 
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, the checks CI runs, and the architecture invariants to know before you start.
-- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately.
+本机生成的安装包属于本地构建产物，不会随 `git clone` 下载。上游网站、TestFlight、Release 与官方 npm 包也不等同于本 fork 的安装包；本仓库尚未发布新的安装包 Release。自行打包时不要沿用上游的自动更新发布目标。
+
+Windows 旧包覆盖安装若提示“Cumora 无法关闭”，即使 App 已退出也可能是旧卸载器的长路径问题，排查和短临时路径重试方法见 [WINDOWS_INSTALLATION.md](docs/WINDOWS_INSTALLATION.md)。此问题尚未完成真实升级验收。
+
+## 分析与公开网页研究
+
+日常聊天保持简洁。研究、评估与实质分析问题要求先核实前提，再由负责人组织证据、影响和反例，最后给出结论与不确定性；不会覆盖用户自定义的人设。
+
+本机 BYOA 通过现有 MCP `cli` 工具使用研究命令，兼容引擎也可通过 `cumora` CLI 调用：
+
+```json
+{"argv":["research","search","public research query"]}
+{"argv":["research","read","https://primary-source.example/announcement"]}
+```
+
+读取器仅访问公开 HTTPS，限制端口、跳转、大小与超时，拦截内网、回环和云元数据地址；不携带模型密钥或登录 Cookie。搜索基于公开 Bing RSS，结果可能缺失或不相关；检索时间、RSS 日期和文章发布日期会区分。搜索不可用时必须明确说明，不能假装已经核验，也不要把私密内容作为公开搜索查询。
+
+## 开发与验证
+
+开发环境、接口和贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)、[API.md](docs/API.md) 和上游 README。常用检查：
+
+```powershell
+npm run typecheck
+npm run server:typecheck
+npm run lint
+npm run guard:engine-registry
+npm run guard:big-brain
+npm run guard:llm-tracked
+npm run guard:migration-locks
+npm test
+```
+
+集成测试只能使用独立的可丢弃测试库，执行方式见 CONTRIBUTING；测试会清空数据，不可指向云端或本机试用库。类型检查、协议测试、真实模型调用、安装包构建和真机验收各自证明不同范围，不能互相替代。
+
+当前已验证本机 Codex 的研究调用、dsh 的模型与文件执行、Android 构建和部分导航场景。MiMo 真实账号执行、完整真机推送、实群协作效果、文档与仓库双向同步仍待验收或实现。功能进展以 [Issues](https://github.com/CrissMagic/cumora/issues) 和对应提交中的验证说明为准。
