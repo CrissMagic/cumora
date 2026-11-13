@@ -11,7 +11,8 @@ import { Select } from '@/components/Select'
 import { Combobox, type ComboboxOption } from '@/components/Combobox'
 import { Checkbox } from '@/components/Checkbox'
 import type { Participant, EngineId } from '@/types'
-import { useT } from '@/lib/i18n'
+import { useLocale, useT } from '@/lib/i18n'
+import { agentTemplates, agentTemplateCategories, RECOMMENDED_AGENT_TEMPLATES } from '../../shared/agent-templates'
 import { catalogTrust } from '@/lib/engine-model-choices'
 import { fastModeAvailable } from '@/lib/agent-fast-mode'
 import { engineLabel } from '@/lib/engines'
@@ -55,12 +56,24 @@ interface Props {
 
 export function AgentEditor({ agent, onClose, onSaved }: Props) {
   const t = useT()
+  const locale = useLocale()
+  const templates = agentTemplates(locale)
+  const initialTemplate = agent ? null : templates[0]
+  const [templateId, setTemplateId] = useState<string>(initialTemplate?.id ?? 'custom')
+  const [customizing, setCustomizing] = useState(!!agent)
+  const [templateCategory, setTemplateCategory] = useState('recommended')
+  const [templateSearch, setTemplateSearch] = useState('')
+  const matchingTemplates = templates.filter((entry) => {
+    const query = templateSearch.trim().toLowerCase()
+    if (query) return `${entry.name} ${entry.role} ${entry.bio}`.toLowerCase().includes(query)
+    return templateCategory === 'recommended' ? RECOMMENDED_AGENT_TEMPLATES.includes(entry.id) : entry.category === templateCategory
+  })
   const editing = agent !== null
-  const [name, setName] = useState(agent?.name ?? '')
-  const [role, setRole] = useState(agent?.role ?? '')
-  const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt ?? '')
-  const [bio, setBio] = useState(agent?.bio ?? '')
-  const [avatarBg, setAvatarBg] = useState(agent?.avatarBg ?? PALETTE[0])
+  const [name, setName] = useState(agent?.name ?? initialTemplate?.name ?? '')
+  const [role, setRole] = useState(agent?.role ?? initialTemplate?.role ?? '')
+  const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt ?? initialTemplate?.systemPrompt ?? '')
+  const [bio, setBio] = useState(agent?.bio ?? initialTemplate?.bio ?? '')
+  const [avatarBg, setAvatarBg] = useState(agent?.avatarBg ?? initialTemplate?.avatarBg ?? PALETTE[0])
   const [providerProfile, setProviderProfile] = useState(agent?.providerProfile ?? '')
   const [model, setModel] = useState(agent?.model ?? '')
   const [fastModel, setFastModel] = useState(agent?.fastModel ?? '')
@@ -272,6 +285,20 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const applyTemplate = (id: string) => {
+    if (id === templateId) return
+    setTemplateId(id)
+    if (id === 'custom') { setCustomizing(true); return }
+    const template = templates.find((entry) => entry.id === id)
+    if (!template) return
+    setName(template.name)
+    setRole(template.role)
+    setSystemPrompt(template.systemPrompt)
+    setBio(template.bio)
+    setAvatarBg(template.avatarBg)
+    setCustomizing(false)
+  }
+
   const submit = async () => {
     if (engineUnavailable) { setErr(t('agent.noRunnableEngine')); return }
     setErr(null)
@@ -408,6 +435,35 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
         </div>
 
         <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1 min-h-0">
+          {!editing && (
+            <div>
+              <div className="mb-2 text-[12px] font-semibold text-ink-700">{t('agent.templateLabel')}</div>
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {[{ id: 'recommended', label: t('agent.templateRecommended') }, ...agentTemplateCategories(locale)].map((category) => (
+                  <button key={category.id} type="button" aria-pressed={templateCategory === category.id}
+                    onClick={() => { setTemplateCategory(category.id); setTemplateSearch('') }}
+                    className={`rounded-full px-2.5 py-1 text-[11px] ${templateCategory === category.id ? 'bg-sky2-100 text-skype-deep' : 'bg-paper text-ink-500'}`}>{category.label}</button>
+                ))}
+              </div>
+              <Input type="search" aria-label={t('agent.templateSearch')} placeholder={t('agent.templateSearch')}
+                value={templateSearch} onChange={(event) => setTemplateSearch(event.target.value)} className="mb-2" />
+              <div className="grid grid-cols-2 gap-2">
+                {matchingTemplates.map((template) => (
+                  <button key={template.id} type="button" aria-pressed={templateId === template.id}
+                    onClick={() => applyTemplate(template.id)}
+                    className={`rounded-xl border px-3 py-2.5 text-left transition ${templateId === template.id ? 'border-skype bg-sky2-50' : 'border-ink-100 bg-cloud hover:bg-paper'}`}>
+                    <div className="flex items-center gap-2 text-[13px] font-semibold text-ink-900">
+                      <span className="h-2 w-2 rounded-full" style={{ background: template.avatarBg }} />{template.name}
+                    </div>
+                    <div className="mt-1 text-[11px] leading-relaxed text-ink-500">{template.bio}</div>
+                  </button>
+                ))}
+              </div>
+              {matchingTemplates.length === 0 && <div className="py-3 text-[12px] text-ink-500">{t('agent.templateNoMatch')}</div>}
+              <button type="button" onClick={() => applyTemplate('custom')} className="mt-2 text-[12px] text-ink-500 hover:text-skype-deep">{t('agent.templateCustom')}</button>
+            </div>
+          )}
+          {customizing && (
           <Field label={t('agent.nameLabel')} hint={t('agent.nameHint')}>
             <Input
               type="text"
@@ -417,6 +473,7 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
             />
           </Field>
 
+          )}
           <Field
             label={t('agent.runsOnLabel')}
             hint={t('agent.runsOnHint')}
@@ -513,6 +570,11 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
             )}
           </Field>
 
+          {!editing && templateId !== 'custom' && (
+            <button type="button" aria-expanded={customizing} onClick={() => setCustomizing((value) => !value)}
+              className="text-[12px] font-semibold text-skype-deep">{t(customizing ? 'agent.templateCollapse' : 'agent.templateCustomize')}</button>
+          )}
+          {customizing && <>
           <Field label={t('agent.roleLabel')} hint={t('agent.roleHint')}>
             <Input
               type="text"
@@ -751,6 +813,7 @@ export function AgentEditor({ agent, onClose, onSaved }: Props) {
             </div>
           </Field>
 
+          </>}
           {err && (
             <div className="text-[12.5px] text-coral-deep bg-coral-soft py-2 px-3 rounded-lg">
               {err}

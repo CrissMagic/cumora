@@ -7,6 +7,9 @@ const crypto = require('node:crypto')
 const { pathToFileURL } = require('node:url')
 const { initialWindowSize } = require('./window-size.cjs')
 const autoUpdater = require('./autoUpdater.cjs')
+const { createColorTrayIcon } = require('./tray-icon.cjs')
+
+if (process.platform === 'win32') app.setAppUserModelId('io.cumora.app')
 
 const isDev = !app.isPackaged
 const DEV_URL = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5180'
@@ -927,6 +930,7 @@ function makeTrayImageFromBitmap(buffer) {
  *      base, so we get pixel-perfect rendering on every display with
  *      zero runtime cost. */
 function loadTrayTemplate(suffix) {
+  if (process.platform !== 'darwin') return createColorTrayIcon(nativeImage, app.getAppPath(), !!suffix)
   const p = path.join(app.getAppPath(), 'build', `tray-template${suffix}.png`)
   const img = nativeImage.createFromPath(p)
   if (img.isEmpty()) return null

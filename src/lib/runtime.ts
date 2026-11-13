@@ -102,7 +102,7 @@ interface CumoraBridge {
     getInfo: () => Promise<UpdateReleasePayload | null>
     check: () => Promise<ManualUpdateResult>
     download: () => Promise<{ ok: boolean; error?: string }>
-    install: () => Promise<{ ok: boolean }>
+    install: () => Promise<{ ok: boolean; error?: string }>
     onStatus: (handler: (payload: AutoUpdateStatus) => void) => () => void
   }
 }

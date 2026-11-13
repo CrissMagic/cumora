@@ -2,10 +2,8 @@
 /**
  * Cumora auto-update — ported from alma's auto-updater.ts.
  *
- * Pulls the latest-mac.yml / latest.yml / latest-linux.yml from the
- * `generic` publish provider configured in package.json (updates.cumora.ai,
- * R2-backed), with the GitHub Release as a fallback feed if the generic
- * one ever 404s. The flow:
+ * Uses the publish provider embedded in app-update.yml by electron-builder.
+ * Fork desktop builds use CrissMagic/cumora GitHub Releases. The flow:
  *
  *   1. Boot the main window, schedule an initial check 3s later.
  *   2. Periodic check every 30 minutes.
@@ -17,10 +15,7 @@
  *   5. Renderer asks to install → we call `quitAndInstall()`. App
  *      relaunches at the new version.
  *
- * `autoDownload=false` + `autoInstallOnAppQuit=true` matches alma's
- * choice: never start downloading without the user clicking, but if a
- * download did complete and the user quits without installing, install
- * silently on next launch.
+ * Download and installation both require a deliberate user action.
  */
 const { app, BrowserWindow, ipcMain } = require('electron')
 const { existsSync } = require('node:fs')
@@ -162,9 +157,9 @@ function initialize() {
   // User clicks "Download" — never silent. Lets you read release notes
   // and decide before a 100MB download saturates a hotspot.
   u.autoDownload = false
-  // If user quits without installing a downloaded update, install on
-  // next quit. Avoids the "I forgot to update for a month" trap.
-  u.autoInstallOnAppQuit = true
+  u.autoInstallOnAppQuit = false
+  u.allowDowngrade = false
+  u.allowPrerelease = false
   registerListeners()
 
   // First check 3s after boot so the splash doesn't compete with
@@ -236,6 +231,9 @@ async function download() {
 }
 
 function quitAndInstall() {
+  if (!isSupported() || _lastStatus?.status !== 'update-downloaded') {
+    return { ok: false, error: 'Download a verified update before installing' }
+  }
   // electron-updater on macOS goes through the native autoUpdater, which
   // calls Browser::Shutdown() directly and skips `before-quit`. That
   // means any close-to-hide handler keyed off an "is the app quitting?"
@@ -244,10 +242,22 @@ function quitAndInstall() {
   // the user sees "the window vanished but nothing restarted." Give the
   // host a hook to flip its quit flag (and tear down auxiliary windows /
   // servers) before we hand off to the native quit path.
-  try { _onBeforeInstall?.() } catch (e) { LOG.error(e?.message) }
+  try { _onBeforeInstall?.() } catch (e) {
+    return { ok: false, error: e?.message || 'Unable to prepare the application for update' }
+  }
   // (isSilent=false, isForceRunAfter=true) — show the installer UX on
   // Windows where applicable; relaunch on macOS / Linux.
-  try { getUpdater().quitAndInstall(false, true) } catch (e) { LOG.error(e?.message) }
+  try {
+    getUpdater().quitAndInstall(false, true)
+    // NsisUpdater can emit a synchronous error instead of throwing when its
+    // installer is no longer available. Do not acknowledge that as success.
+    if (_lastStatus?.status === 'error') return { ok: false, error: _lastStatus.detail }
+    return { ok: true }
+  } catch (e) {
+    const error = e?.message || String(e)
+    broadcast({ status: 'error', detail: error, triggeredByUser: true })
+    return { ok: false, error }
+  }
 }
 
 /** Register a callback that fires immediately before the native quit
@@ -291,7 +301,7 @@ function registerIpc() {
   ipcMain.handle('update:info', () => getInfo())
   ipcMain.handle('update:check', () => checkManually())
   ipcMain.handle('update:download', () => download())
-  ipcMain.handle('update:install', () => { quitAndInstall(); return { ok: true } })
+  ipcMain.handle('update:install', () => quitAndInstall())
 }
 
 module.exports = {

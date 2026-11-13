@@ -27,7 +27,7 @@
  *   • not_found — bad link.
  */
 import { useCallback, useEffect, useState, useRef } from 'react'
-import { api, type ApiInvitationPreview } from '@/api/client'
+import { api, getPairingServerOrigin, type ApiInvitationPreview } from '@/api/client'
 import { useAuth } from '@/stores/auth'
 import { isElectron, isWebAppHost } from '@/lib/runtime'
 import { useT } from '@/lib/i18n'
@@ -479,9 +479,8 @@ function SignInToAccept({ token }: { token: string }) {
     // Persist BEFORE redirect so the post-OAuth landing can resume here.
     stashPendingInvite(token)
     if (isElectron && window.cumora?.auth) {
-      const origin = (typeof localStorage !== 'undefined' && localStorage.getItem('cumora.serverUrl'))
-        || (import.meta.env.VITE_CUMORA_API_BASE as string | undefined)
-        || 'https://api.cumora.ai'
+      const origin = getPairingServerOrigin()
+      if (!origin) { setBusy(null); return }
       const inv = encodeURIComponent(token)
       // Arm a single-use nonce (anti session-fixation — see AuthScreen). The
       // nonce rides the return URL's query and must match on the inbound token.

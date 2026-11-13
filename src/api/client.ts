@@ -1,4 +1,6 @@
 import { getActiveCompanyId, getAuthToken, useAuth } from '@/stores/auth'
+import { isElectron } from '@/lib/runtime'
+import { needsServerAddress, resolveServerAddress, saveServerAddress, SERVER_ADDRESS_KEY } from '@/lib/server-address'
 import type { ProjectWorkspace } from '../../shared/project-workspaces'
 import type { EngineUpdate } from '../../shared/engine-update'
 import type { AttachmentDescriptor } from '../../shared/attachments'
@@ -10,7 +12,6 @@ import type {
 } from '@/types'
 
 const DEVTOOLS_KEY = 'cumora.devtools.enabled'
-const SERVER_URL_KEY = 'cumora.serverUrl'
 
 // Vite's relative proxy keeps browser requests same-origin, but the pairing
 // command runs outside the browser and must address the API directly.
@@ -19,26 +20,18 @@ const DEV_API_TARGET = import.meta.env.DEV
   : undefined
 
 /** Resolve the API base. Three layers, highest priority first:
- *    1. localStorage['cumora.serverUrl'] — runtime override, settable
- *       from the dev console: `localStorage.setItem('cumora.serverUrl',
- *       'https://api.cumora.ai')`. Lets a packaged build switch between
- *       prod and a custom endpoint without rebuilding.
- *    2. import.meta.env.VITE_CUMORA_API_BASE — baked at build time,
- *       e.g. .env.production points it at https://api.cumora.ai.
+ *    1. localStorage['cumora.serverUrl'] — user choice from setup/login.
+ *    2. import.meta.env.VITE_CUMORA_API_BASE — optional Web/native default;
+ *       the public Windows build explicitly clears this value.
  *    3. '' — falls back to relative URLs, which work in Vite dev (the
  *       proxy rewrites /api → CUMORA_DEV_API_TARGET) and in any same-
- *       origin static deploy.
+ *       origin static deploy. Packaged desktop instead requires setup.
  *  Values should be the origin only, with NO trailing slash and NO
  *  `/api` suffix — the suffix is added on use, so `http(...)` and the
  *  WS / ws-ticket paths stay consistent. */
 function resolveServerOrigin(): string {
-  if (typeof localStorage !== 'undefined') {
-    const override = localStorage.getItem(SERVER_URL_KEY)
-    if (override) return override.replace(/\/+$/, '')
-  }
   const baked = import.meta.env.VITE_CUMORA_API_BASE as string | undefined
-  if (baked) return baked.replace(/\/+$/, '')
-  return ''
+  return resolveServerAddress(typeof localStorage !== 'undefined' ? localStorage.getItem(SERVER_ADDRESS_KEY) : null, baked)
 }
 
 const SERVER_ORIGIN = resolveServerOrigin()
@@ -50,6 +43,10 @@ const API = `${SERVER_ORIGIN}/api`
  *  through the Vite proxy or same-origin." */
 export function getServerOrigin(): string {
   return SERVER_ORIGIN
+}
+
+export function requiresServerAddress(): boolean {
+  return needsServerAddress(isElectron, import.meta.env.DEV, SERVER_ORIGIN)
 }
 
 /** Origin to embed in a local computer pairing command.
@@ -66,14 +63,9 @@ export function getPairingServerOrigin(): string {
  *  the new origin. Pass `null` to drop the override entirely (revert to
  *  build-time default). */
 export function setServerOrigin(origin: string | null): void {
-  if (origin == null || origin.trim() === '') {
-    localStorage.removeItem(SERVER_URL_KEY)
-  } else {
-    localStorage.setItem(SERVER_URL_KEY, origin.trim().replace(/\/+$/, ''))
-  }
   // Auth token is server-scoped — DELETE here so a reload lands on AuthScreen
   // instead of probing /auth/me against the new origin with a stale token.
-  useAuth.getState().clear()
+  saveServerAddress(localStorage, origin, () => useAuth.getState().clear())
 }
 
 /** WS origin (ws:// or wss://) derived from the resolved server origin.
@@ -104,6 +96,7 @@ export class ApiError extends Error {
 }
 
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  if (requiresServerAddress()) throw new Error('Configure your API server before signing in')
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   const token = getAuthToken()
   if (token) headers.authorization = `Bearer ${token}`
@@ -1667,6 +1660,7 @@ class WsClient {
   }
 
   private async connectImpl() {
+    if (requiresServerAddress()) return
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
     const token = getAuthToken()
     if (!token) return  // not signed in → don't even try

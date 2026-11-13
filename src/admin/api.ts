@@ -9,22 +9,21 @@
  * is what authenticates admin calls.
  */
 import { getAuthToken, useAuth } from '@/stores/auth'
+import { needsServerAddress, resolveServerAddress, SERVER_ADDRESS_KEY } from '@/lib/server-address'
+import { isElectron } from '@/lib/runtime'
 
 function origin(): string {
-  if (typeof localStorage !== 'undefined') {
-    const override = localStorage.getItem('cumora.serverUrl')
-    if (override) return override.replace(/\/+$/, '')
-  }
-  const baked = import.meta.env.VITE_CUMORA_API_BASE as string | undefined
-  if (baked) return baked.replace(/\/+$/, '')
-  return ''
+  return resolveServerAddress(typeof localStorage !== 'undefined' ? localStorage.getItem(SERVER_ADDRESS_KEY) : null,
+    import.meta.env.VITE_CUMORA_API_BASE as string | undefined)
 }
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const base = origin()
+  if (needsServerAddress(isElectron, import.meta.env.DEV, base)) throw new Error('Configure your API server before signing in')
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   const token = getAuthToken()
   if (token) headers.authorization = `Bearer ${token}`
-  const res = await fetch(`${origin()}/api/admin${path}`, {
+  const res = await fetch(`${base}/api/admin${path}`, {
     headers: { ...headers, ...(init?.headers ?? {}) },
     ...init,
   })

@@ -1,6 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
+import { ServerGate } from './components/ServerSetup'
 import { ConditionalPostHogProvider } from './components/ConditionalPostHogProvider'
 import { PostHogAppTracker } from './components/PostHogAppTracker'
 import { initObservability } from './lib/observability'
@@ -17,9 +18,11 @@ void bootNative()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ConditionalPostHogProvider>
-      <PostHogAppTracker />
-      <App />
-    </ConditionalPostHogProvider>
+    <ServerGate>
+      <ConditionalPostHogProvider>
+        <PostHogAppTracker />
+        <App />
+      </ConditionalPostHogProvider>
+    </ServerGate>
   </StrictMode>,
 )

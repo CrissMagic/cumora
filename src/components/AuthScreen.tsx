@@ -12,7 +12,8 @@
  * per-server.
  */
 import { useState, useEffect } from 'react'
-import { api, getPairingServerOrigin, getServerOrigin, setServerOrigin } from '@/api/client'
+import { api, getPairingServerOrigin, getServerOrigin, requiresServerAddress, setServerOrigin } from '@/api/client'
+import { ServerAddressForm } from './ServerSetup'
 import { isCapacitorIOS, isElectron } from '@/lib/runtime'
 import { isNativePlatform, nativePlatform, runAppleSignIn, runOAuth } from '@/lib/native'
 import { useAuth } from '@/stores/auth'
@@ -106,6 +107,7 @@ export function AuthScreen() {
   }
 
   function go(provider: 'google' | 'github' | 'gitlab') {
+    if (requiresServerAddress()) { setErr(t('auth.serverSetupIntro')); return }
     setBusy(provider); setErr(null)
     if (isElectron && window.cumora?.auth) {
       // Open the user's real browser (Safari / Chrome) so they see the
@@ -117,7 +119,8 @@ export function AuthScreen() {
       // getServerOrigin() is '' in dev (relative, for the Vite proxy) —
       // use the pairing origin so local dev opens the local server instead
       // of falling through to production.
-      const origin = getPairingServerOrigin() || 'https://api.cumora.ai'
+      const origin = getPairingServerOrigin()
+      if (!origin) { setErr(t('auth.serverSetupIntro')); setBusy(null); return }
       // Arm a single-use nonce and thread it through the return URL. The server
       // round-trips it back onto /auth/done, the loopback page carries it into
       // the cumora:// deep link, and main accepts the token only if the nonce
@@ -273,7 +276,6 @@ function currentOriginLabel(t: ReturnType<typeof useT>): string {
 
 function ServerSwitch({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   const t = useT()
-  const [custom, setCustom] = useState('')
   const current = getServerOrigin()
 
   function apply(origin: string | null) {
@@ -300,7 +302,7 @@ function ServerSwitch({ open, onToggle }: { open: boolean; onToggle: () => void 
         <div className="text-[12px] font-display text-ink-900">{t('auth.apiServer')}</div>
         <button type="button" onClick={onToggle} className="text-[11px] text-ink-500 hover:text-ink-900">{t('common.close')}</button>
       </div>
-      {PRESETS.map((p) => (
+      {!isElectron && PRESETS.map((p) => (
         <button
           key={p.origin}
           type="button"
@@ -311,30 +313,14 @@ function ServerSwitch({ open, onToggle }: { open: boolean; onToggle: () => void 
           <span className="text-[10px] text-ink-500">{p.origin}</span>
         </button>
       ))}
-      <div className="flex items-stretch gap-2 pt-1">
-        <input
-          type="url"
-          value={custom}
-          onChange={(e) => setCustom(e.target.value)}
-          placeholder="https://your-server"
-          className="flex-1 h-9 px-2 rounded-[6px] border border-ink-100 bg-paper text-ink-900 placeholder:text-ink-300 text-[12px] focus:outline-none focus:border-sky2-300"
-        />
-        <button
-          type="button"
-          disabled={!custom.trim()}
-          onClick={() => apply(custom.trim())}
-          className="h-9 px-3 rounded-[6px] bg-skype hover:bg-skype-deep text-white text-[12px] disabled:opacity-40"
-        >
-          {t('common.use')}
-        </button>
-      </div>
+      <ServerAddressForm initialValue={current} onSave={apply} />
       {current && (
         <button
           type="button"
           onClick={() => apply(null)}
           className="text-[11px] text-ink-500 hover:text-ink-900 self-start"
         >
-          {t('auth.clearOverride')}
+          {t(isElectron ? 'auth.reconfigureServer' : 'auth.clearOverride')}
         </button>
       )}
     </div>

@@ -1,57 +1,137 @@
-name: Release
-
-# Fires when a `v*` tag is pushed (or manually via workflow_dispatch).
-# Hand off to yetone/cumora-releases which has the matrix runners that
-# build + sign + publish the Electron app for every platform.
-#
-# The GKE backend roll-out is deliberately NOT tied to this tag: deploy.yml
-# is `workflow_dispatch` only, so a desktop release never mutates production.
+name: Windows Desktop Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
     inputs:
+      ref:
+        description: 'Existing source ref to build'
+        required: true
+        default: 'codex/cloud-self-hosting'
+        type: string
       version:
-        description: 'Version to release (e.g., 0.1.0 — no v prefix)'
+        description: 'Must match package.json, e.g. 0.18.10'
         required: true
         type: string
+      publish:
+        description: 'Publish an existing matching v<version> tag; false builds artifacts only'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.event_name == 'push' && github.ref_name || format('v{0}', github.event.inputs.version) }}
+  cancel-in-progress: false
 
 jobs:
-  trigger-release:
-    runs-on: ubuntu-latest
-
+  windows:
+    if: github.repository == 'CrissMagic/cumora'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      revision: ${{ steps.release.outputs.revision }}
+    env:
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
-      - name: Get version
-        id: version
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION="${{ github.ref_name }}"
-            VERSION="${VERSION#v}"
-            REF="${{ github.ref_name }}"
-          else
-            VERSION="${{ github.event.inputs.version }}"
-            REF="v${{ github.event.inputs.version }}"
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "ref=$REF" >> $GITHUB_OUTPUT
-          echo "Triggering release for version: $VERSION (ref: $REF)"
-
-      - name: Trigger release workflow in cumora-releases
-        uses: peter-evans/repository-dispatch@v3
+      - uses: actions/checkout@v4
         with:
-          # PAT with `repo` + `workflow` scope on yetone/cumora-releases.
-          # Stored as RELEASES_REPO_TOKEN in yetone/cumora secrets.
-          token: ${{ secrets.RELEASES_REPO_TOKEN }}
-          repository: yetone/cumora-releases
-          event-type: release
-          client-payload: '{"ref": "${{ steps.version.outputs.ref }}", "version": "${{ steps.version.outputs.version }}"}'
-
-      - name: Output status
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Validate release source and version
+        id: release
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}
+          PUBLISH_REQUESTED: ${{ github.event.inputs.publish }}
+          EVENT_NAME: ${{ github.event_name }}
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          echo "Successfully triggered release workflow in cumora-releases"
-          echo "Version: ${{ steps.version.outputs.version }}"
-          echo "Ref: ${{ steps.version.outputs.ref }}"
-          echo ""
-          echo "Watch the build at: https://github.com/yetone/cumora-releases/actions"
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Only stable release versions are supported' }
+          $tag = 'v' + $version
+          if ($env:EVENT_NAME -eq 'push' -and $env:TAG_NAME -ne $tag) { throw 'Tag must match package.json' }
+          if ($env:REQUESTED_VERSION -and $env:REQUESTED_VERSION -ne $version) { throw 'Requested version must match package.json' }
+          $revision = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:EVENT_NAME -eq 'push' -or $env:PUBLISH_REQUESTED -eq 'true') {
+            $tagRevision = git rev-parse "${tag}^{commit}"
+            if ($LASTEXITCODE -ne 0) { throw 'Create the release tag before publishing' }
+            if ($tagRevision -ne $revision) { throw 'Release tag and source commit differ' }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "revision=$revision" >> $env:GITHUB_OUTPUT
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run server:typecheck
+      - run: npm run lint
+      - run: node --import tsx --test tests/agent-templates.test.ts tests/electron-auto-update.test.ts tests/electron-tray-icon.test.ts tests/server-address.test.ts
+      - name: Build Windows installer and update metadata
+        run: npm run desktop:build:win
+      - name: Verify artifacts, update feed and package contents
+        run: npm run desktop:verify:win
+      - name: Prepare reviewed release notes
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: Copy-Item -LiteralPath "docs/releases/$env:RELEASE_VERSION.md" -Destination release/release-notes.md -ErrorAction Stop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cumora-windows-${{ steps.release.outputs.version }}
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            release/Cumora-Setup-${{ steps.release.outputs.version }}.exe
+            release/Cumora-Setup-${{ steps.release.outputs.version }}.exe.blockmap
+            release/latest.yml
+            release/release-notes.md
+
+  publish:
+    needs: windows
+    if: github.event_name == 'push' || github.event.inputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.windows.outputs.tag }}
+      VERSION: ${{ needs.windows.outputs.version }}
+      REVISION: ${{ needs.windows.outputs.revision }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cumora-windows-${{ needs.windows.outputs.version }}
+          path: artifacts
+      - name: Publish verified artifacts together
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_revision=$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)
+          if [ "$tag_revision" != "$REVISION" ]; then
+            echo 'Release tag changed after the build; refusing to publish.' >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --json isDraft > release.json 2>/dev/null; then
+            if [ "$(jq -r .isDraft release.json)" != true ]; then
+              echo 'Refusing to overwrite a published update. Bump the version instead.' >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --target "$REVISION" --draft --title "Cumora $VERSION" --notes-file artifacts/release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" "artifacts/Cumora-Setup-$VERSION.exe" "artifacts/Cumora-Setup-$VERSION.exe.blockmap" artifacts/latest.yml --clobber
+          gh release edit "$RELEASE_TAG" --notes-file artifacts/release-notes.md --draft=false --prerelease=false --latest

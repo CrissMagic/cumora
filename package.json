@@ -1,7 +1,7 @@
 {
   "name": "cumora",
   "private": true,
-  "version": "0.18.9",
+  "version": "0.18.10",
   "type": "module",
   "main": "electron/main.cjs",
   "bin": {
@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yetone/cumora.git"
+    "url": "https://github.com/CrissMagic/cumora.git"
   },
   "homepage": "https://cumora.ai",
   "author": {
@@ -53,7 +53,9 @@
     "mobile:android": "npm run mobile:sync && npx cap open android",
     "mobile:android:run": "npm run mobile:sync && npx cap run android",
     "android:sync": "npm run build && cap sync android",
-    "android:build": "npm run android:sync && node scripts/build-android.mjs"
+    "android:build": "npm run android:sync && node scripts/build-android.mjs",
+    "desktop:build:win": "node scripts/build-desktop-win.mjs",
+    "desktop:verify:win": "node scripts/verify-desktop-release.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1045.0",
@@ -152,7 +154,8 @@
       "electron/**/*",
       "build/icon.png",
       "build/tray-template*.png",
-      "package.json"
+      "package.json",
+      "!**/node_modules/@capacitor{,/**/*}"
     ],
     "directories": {
       "output": "release",
@@ -160,15 +163,9 @@
     },
     "publish": [
       {
-        "provider": "generic",
-        "url": "https://updates.cumora.ai",
-        "channel": "latest",
-        "useMultipleRangeRequest": false
-      },
-      {
         "provider": "github",
-        "owner": "yetone",
-        "repo": "cumora-releases",
+        "owner": "CrissMagic",
+        "repo": "cumora",
         "releaseType": "release",
         "publishAutoUpdate": true
       }
@@ -210,7 +207,14 @@
       "icon": "build/icons/icon.ico"
     },
     "nsis": {
-      "artifactName": "Cumora-Setup-${version}.${ext}"
+      "artifactName": "Cumora-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icons/icon.ico",
+      "uninstallerIcon": "build/icons/icon.ico"
     },
     "linux": {
       "target": [

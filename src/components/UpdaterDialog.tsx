@@ -84,17 +84,26 @@ export function useUpdater(): UpdaterState & {
   const check = useCallback(async () => {
     const bridge = window.cumora?.update
     if (!bridge) return
-    await bridge.check()
+    try {
+      const result = await bridge.check()
+      if (result.status === 'error' || result.status === 'unsupported') setStatus({ status: result.status, detail: result.message, triggeredByUser: true })
+    } catch (error) { setStatus({ status: 'error', detail: String(error), triggeredByUser: true }) }
   }, [])
   const download = useCallback(async () => {
     const bridge = window.cumora?.update
     if (!bridge) return
-    await bridge.download()
+    try {
+      const result = await bridge.download()
+      if (!result.ok) setStatus({ status: 'error', detail: result.error, triggeredByUser: true })
+    } catch (error) { setStatus({ status: 'error', detail: String(error), triggeredByUser: true }) }
   }, [])
   const install = useCallback(async () => {
     const bridge = window.cumora?.update
     if (!bridge) return
-    await bridge.install()
+    try {
+      const result = await bridge.install()
+      if (!result.ok) setStatus({ status: 'error', detail: result.error, triggeredByUser: true })
+    } catch (error) { setStatus({ status: 'error', detail: String(error), triggeredByUser: true }) }
   }, [])
 
   return { ready, appInfo, status, releaseInfo, check, download, install }

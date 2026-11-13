@@ -14,6 +14,8 @@
 | MiMo Code | 独立 `mimo` 引擎，使用官方 `@mimo-ai/cli`，支持 JSON 执行、会话及模型配置、独立用量来源 | 适配器行为测试已覆盖；真实账号执行与续接仍待验收 |
 | 按引擎兼容授权 | `CUMORA_BYOA_COMPAT_ENGINES=deepseek` 只允许指定兼容引擎执行 | dsh 可访问宿主机文件和网络；此设置不会解除 Codex / Claude 的隔离 |
 | 引擎选择与发现 | 添加智能体时优先显示可运行、已安装的引擎；显示阻断原因并支持重新检测 | 未安装或不可运行的引擎可见但不可选；检测不会自动安装工具或授予权限 |
+| 智能体模板 | 21 个科技公司常用岗位，按规划协作、研发质量、产品设计、研究数据、运营支持分类并支持搜索；默认补齐角色信息 | 维持扁平协作，只需选择运行电脑与引擎；支持展开编辑，不绑定模型或额外授予执行权限 |
+| Windows 更新与图标 | 彩色托盘图标及未读标记；当前 fork 内的安装包、blockmap、更新元数据和发布工作流 | 使用 GitHub Releases；真实公开发布及跨版本覆盖更新需按发布步骤验收 |
 | 本地项目目录 | 电脑端创建项目、关联执行电脑、绑定或解绑已有目录 / Git 仓库；智能体按项目切换工作目录与会话 | 保留 `.git` 和未提交文件；解绑不删除仓库；应用内协作文档和附件不会自动同步为仓库文件 |
 | Android | 补齐资源同步、debug APK 构建、版本生成、可选 Firebase 配置及构建工作流 | 已有本地构建和模拟器验证；商店发布、生产签名及完整真机推送验收另行进行 |
 | 移动端交互 | 调整聊天与底部导航、面板返回层级，修复二级页面系统返回直接退出和取消手势重复返回 | 手机基于已有项目聊天，项目创建与目录管理在电脑端完成 |
@@ -86,10 +88,10 @@ node agent-cli/dist/cli.js agent computer --pair CODE --server https://cumora.ex
 在电脑端 **我 → 项目 → 工作目录** 关联电脑并绑定已有目录。路径必须属于执行端：原生 Windows 使用 Windows 绝对路径，WSL 执行端使用 `/mnt/...` 路径。先确认目录就绪，再从手机发起项目任务。
 
 - Android：按 [MOBILE_ANDROID.md](docs/MOBILE_ANDROID.md) 设置 `VITE_CUMORA_API_BASE` 后执行 `npm run android:build`。debug APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。
-- Windows 桌面：使用 Electron 构建流程，说明见 [RELEASE.md](docs/RELEASE.md)；自托管构建使用自己的服务地址与发布配置。
+- Windows 桌面：使用 Electron 构建流程，说明见 [RELEASE.md](docs/RELEASE.md)。通用安装包不内置个人服务地址；首次启动填写 API 服务地址并连接，地址保存在本机，之后可在登录页切换，切换后需重新登录。
 - 同局域网先行试用：使用 [LOCAL_PC_TRIAL.md](docs/LOCAL_PC_TRIAL.md) 的独立服务与数据库，避免影响已有实例。
 
-本机生成的安装包属于本地构建产物，不会随 `git clone` 下载。上游网站、TestFlight、Release 与官方 npm 包也不等同于本 fork 的安装包；本仓库尚未发布新的安装包 Release。自行打包时不要沿用上游的自动更新发布目标。
+本机生成的安装包属于本地构建产物，不会随 `git clone` 下载。Windows 的构建与发布流程见 [RELEASE.md](docs/RELEASE.md)，更新源为本 fork 的 GitHub Releases；客户端只读取已经公开的正式 Release，Actions 候选构建不会用于软件更新。上游网站、TestFlight、Release 与官方 npm 包不等同于本 fork 的安装包。
 
 Windows 旧包覆盖安装若提示“Cumora 无法关闭”，即使 App 已退出也可能是旧卸载器的长路径问题，排查和短临时路径重试方法见 [WINDOWS_INSTALLATION.md](docs/WINDOWS_INSTALLATION.md)。此问题尚未完成真实升级验收。
 
